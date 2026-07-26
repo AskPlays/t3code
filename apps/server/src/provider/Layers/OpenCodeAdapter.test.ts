@@ -63,6 +63,7 @@ const runtimeMock = {
     sessionCreateInputs: [] as Array<Record<string, unknown>>,
     authHeaders: [] as Array<string | null>,
     abortCalls: [] as string[],
+    abortPromise: null as Promise<void> | null,
     closeCalls: [] as string[],
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     promptCalls: [] as Array<unknown>,
@@ -89,6 +90,7 @@ const runtimeMock = {
     this.state.sessionCreateInputs.length = 0;
     this.state.authHeaders.length = 0;
     this.state.abortCalls.length = 0;
+    this.state.abortPromise = null;
     this.state.closeCalls.length = 0;
     this.state.revertCalls.length = 0;
     this.state.promptCalls.length = 0;
@@ -197,6 +199,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
         abort: async ({ sessionID }: { sessionID: string }) => {
           runtimeMock.state.abortCalls.push(sessionID);
+          await runtimeMock.state.abortPromise;
         },
         promptAsync: async (input: unknown) => {
           runtimeMock.state.promptCalls.push(input);
@@ -581,6 +584,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       runtimeMock.state.commandPromise = new Promise<void>((_resolve, reject) => {
         rejectCommand = reject;
       });
+      let resolveAbort!: () => void;
+      runtimeMock.state.abortPromise = new Promise<void>((resolve) => {
+        resolveAbort = resolve;
+      });
       const terminalEvents: Array<ProviderRuntimeEvent> = [];
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter(
@@ -609,8 +616,25 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           "anthropic/sonnet",
         ),
       });
-      yield* adapter.interruptTurn(threadId, turn.turnId);
+      const interruptFiber = yield* adapter
+        .interruptTurn(threadId, turn.turnId)
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      NodeAssert.equal(runtimeMock.state.abortCalls.length, 1);
+
+      const steeredTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "Include the tests",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "anthropic/sonnet",
+        ),
+      });
+      NodeAssert.equal(steeredTurn.turnId, turn.turnId);
+
       rejectCommand(new Error("late command failure"));
+      resolveAbort();
+      yield* Fiber.join(interruptFiber);
       yield* Effect.yieldNow;
       yield* Effect.yieldNow;
 
