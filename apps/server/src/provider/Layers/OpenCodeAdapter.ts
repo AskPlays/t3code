@@ -2157,18 +2157,40 @@ export function makeOpenCodeAdapter(
             ).pipe(Effect.ignore({ log: true })),
           { concurrency: "unbounded", discard: true },
         );
+        const interruptedTurnId = turnId ?? context.activeTurnId;
+        const ownsInterruptedTurn =
+          interruptedTurnId !== undefined && context.activeTurnId === interruptedTurnId;
+        if (ownsInterruptedTurn) {
+          // Relinquish ownership before awaiting the abort request. A detached
+          // command may reject while abort is in flight; its failure handler
+          // must not overwrite the interruption with a hard failure.
+          context.activeTurnId = undefined;
+        }
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
-        ).pipe(Effect.mapError(toRequestError));
-        if (turnId ?? context.activeTurnId) {
+        ).pipe(
+          Effect.mapError(toRequestError),
+          Effect.tapError(() =>
+            ownsInterruptedTurn && context.activeTurnId === undefined
+              ? Effect.sync(() => {
+                  context.activeTurnId = interruptedTurnId;
+                })
+              : Effect.void,
+          ),
+        );
+        if (interruptedTurnId) {
+          if (ownsInterruptedTurn && context.activeTurnId === undefined) {
+            yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
+          }
           yield* emit({
             ...(yield* buildEventBase({
               threadId,
-              turnId: turnId ?? context.activeTurnId,
+              turnId: interruptedTurnId,
             })),
-            type: "turn.aborted",
+            type: "turn.completed",
             payload: {
-              reason: "Interrupted by user.",
+              state: "interrupted",
+              stopReason: "Interrupted by user.",
             },
           });
         }
