@@ -19,6 +19,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -252,7 +253,6 @@ interface OpenCodeSessionContext {
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
-  readonly interruptingTurnIds: Set<TurnId>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
   /**
    * Parented (subagent) OpenCode sessions of this session, keyed by OpenCode
@@ -269,6 +269,8 @@ interface OpenCodeSessionContext {
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
+  interruptAttempt: OpenCodeInterruptAttempt | undefined;
+  recentlyInterruptedTurnId: TurnId | undefined;
   /**
    * Cumulative token totals last observed for the owned session. OpenCode
    * reports session totals that only grow (compaction summarises but never
@@ -322,6 +324,13 @@ interface OpenCodeSubagentTask {
   latestTokensOutput: number;
   latestTokensReasoning: number;
   latestTokensCacheRead: number;
+}
+
+interface OpenCodeInterruptAttempt {
+  readonly turnId: TurnId;
+  readonly completion: Deferred.Deferred<void, ProviderAdapterRequestError>;
+  terminalClaimed: boolean;
+  pendingCommandError: ProviderAdapterRequestError | undefined;
 }
 
 export interface OpenCodeAdapterLiveOptions {
@@ -1275,6 +1284,67 @@ export function makeOpenCodeAdapter(
             ),
           );
 
+    const completeInterruptedTurn = Effect.fn("completeInterruptedTurn")(function* (
+      context: OpenCodeSessionContext,
+      attempt: OpenCodeInterruptAttempt,
+      raw?: unknown,
+    ) {
+      if (attempt.terminalClaimed) {
+        return false;
+      }
+      attempt.terminalClaimed = true;
+      context.recentlyInterruptedTurnId = attempt.turnId;
+      if (context.activeTurnId === attempt.turnId) {
+        context.activeTurnId = undefined;
+        yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
+      }
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: attempt.turnId,
+          ...(raw !== undefined ? { raw } : {}),
+        })),
+        type: "turn.completed",
+        payload: {
+          state: "interrupted",
+          stopReason: "Interrupted by user.",
+        },
+      });
+      return true;
+    });
+
+    const failDetachedCommand = Effect.fn("failDetachedCommand")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+      requestError: ProviderAdapterRequestError,
+    ) {
+      if (context.activeTurnId !== turnId) {
+        return;
+      }
+      context.activeTurnId = undefined;
+      context.activeAgent = undefined;
+      context.activeVariant = undefined;
+      yield* updateProviderSession(
+        context,
+        {
+          status: "error",
+          lastError: requestError.detail,
+        },
+        { clearActiveTurnId: true },
+      );
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId,
+        })),
+        type: "turn.completed",
+        payload: {
+          state: "failed",
+          errorMessage: requestError.detail,
+        },
+      });
+    });
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
@@ -1611,21 +1681,28 @@ export function makeOpenCodeAdapter(
           }
 
           if (event.properties.status.type === "idle" && turnId) {
-            const wasInterrupted = context.interruptingTurnIds.delete(turnId);
-            context.activeTurnId = undefined;
-            yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
-            yield* emit({
-              ...(yield* buildEventBase({
-                threadId: context.session.threadId,
-                turnId,
-                raw: event,
-              })),
-              type: "turn.completed",
-              payload: {
-                state: wasInterrupted ? "interrupted" : "completed",
-                ...(wasInterrupted ? { stopReason: "Interrupted by user." } : {}),
-              },
-            });
+            const interruptAttempt = context.interruptAttempt;
+            if (interruptAttempt?.turnId === turnId) {
+              yield* completeInterruptedTurn(context, interruptAttempt, event);
+            } else {
+              context.activeTurnId = undefined;
+              yield* updateProviderSession(
+                context,
+                { status: "ready" },
+                { clearActiveTurnId: true },
+              );
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  raw: event,
+                })),
+                type: "turn.completed",
+                payload: {
+                  state: "completed",
+                },
+              });
+            }
           }
           break;
         }
@@ -1633,18 +1710,23 @@ export function makeOpenCodeAdapter(
         case "session.error": {
           const message = sessionErrorMessage(event.properties.error);
           const activeTurnId = context.activeTurnId;
-          const wasInterrupted =
-            activeTurnId !== undefined && context.interruptingTurnIds.delete(activeTurnId);
+          const interruptAttempt = context.interruptAttempt;
+          if (activeTurnId && interruptAttempt?.turnId === activeTurnId) {
+            yield* completeInterruptedTurn(context, interruptAttempt, event);
+            break;
+          }
+          if (activeTurnId === undefined && context.recentlyInterruptedTurnId !== undefined) {
+            break;
+          }
           context.activeTurnId = undefined;
           yield* updateProviderSession(
             context,
             {
-              status: wasInterrupted ? "ready" : "error",
-              ...(wasInterrupted ? {} : { lastError: message }),
+              status: "error",
+              lastError: message,
             },
             {
               clearActiveTurnId: true,
-              ...(wasInterrupted ? { clearLastError: true } : {}),
             },
           );
           if (activeTurnId) {
@@ -1656,27 +1738,23 @@ export function makeOpenCodeAdapter(
               })),
               type: "turn.completed",
               payload: {
-                state: wasInterrupted ? "interrupted" : "failed",
-                ...(wasInterrupted
-                  ? { stopReason: "Interrupted by user." }
-                  : { errorMessage: message }),
+                state: "failed",
+                errorMessage: message,
               },
             });
           }
-          if (!wasInterrupted) {
-            yield* emit({
-              ...(yield* buildEventBase({
-                threadId: context.session.threadId,
-                raw: event,
-              })),
-              type: "runtime.error",
-              payload: {
-                message,
-                class: "provider_error",
-                detail: event.properties.error,
-              },
-            });
-          }
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              raw: event,
+            })),
+            type: "runtime.error",
+            payload: {
+              message,
+              class: "provider_error",
+              detail: event.properties.error,
+            },
+          });
           break;
         }
 
@@ -1945,7 +2023,6 @@ export function makeOpenCodeAdapter(
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
           completedAssistantPartIds: new Set(),
-          interruptingTurnIds: new Set(),
           turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
@@ -1956,6 +2033,8 @@ export function makeOpenCodeAdapter(
           latestTokensCacheRead: started.openCodeSession.tokens?.cache?.read ?? 0,
           latestTokensCacheWrite: started.openCodeSession.tokens?.cache?.write ?? 0,
           modelProviders: undefined,
+          interruptAttempt: undefined,
+          recentlyInterruptedTurnId: undefined,
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
           subagentTasks: new Map(),
@@ -1990,6 +2069,9 @@ export function makeOpenCodeAdapter(
       // the active turn id is reused instead of opening a new turn.
       const steeringTurnId = context.activeTurnId;
       const turnId = steeringTurnId ?? TurnId.make(`opencode-turn-${yield* randomUUIDv4}`);
+      if (steeringTurnId === undefined) {
+        context.recentlyInterruptedTurnId = undefined;
+      }
       const modelSelection =
         input.modelSelection ??
         (context.session.model
@@ -2092,48 +2174,47 @@ export function makeOpenCodeAdapter(
         // prompt dispatch failures still propagate to the caller, which owns
         // start-failure recovery. A failed steer leaves the still-running
         // original turn untouched.
-        Effect.tapError((requestError) =>
-          steeringTurnId !== undefined ||
-          context.activeTurnId !== turnId ||
-          context.interruptingTurnIds.has(turnId)
-            ? Effect.void
-            : Effect.gen(function* () {
-                context.activeTurnId = undefined;
-                context.activeAgent = undefined;
-                context.activeVariant = undefined;
-                yield* updateProviderSession(
-                  context,
-                  {
-                    status: command ? "error" : "ready",
-                    model: modelSelection?.model ?? context.session.model,
-                    lastError: requestError.detail,
-                  },
-                  { clearActiveTurnId: true },
-                );
-                const eventBase = yield* buildEventBase({
-                  threadId: input.threadId,
-                  turnId,
-                });
-                if (command) {
-                  yield* emit({
-                    ...eventBase,
-                    type: "turn.completed",
-                    payload: {
-                      state: "failed",
-                      errorMessage: requestError.detail,
-                    },
-                  });
-                } else {
-                  yield* emit({
-                    ...eventBase,
-                    type: "turn.aborted",
-                    payload: {
-                      reason: requestError.detail,
-                    },
-                  });
-                }
-              }),
-        ),
+        Effect.tapError((requestError) => {
+          if (steeringTurnId !== undefined || context.activeTurnId !== turnId) {
+            return Effect.void;
+          }
+          const interruptAttempt = context.interruptAttempt;
+          if (command && interruptAttempt?.turnId === turnId) {
+            return Effect.sync(() => {
+              interruptAttempt.pendingCommandError = requestError;
+            });
+          }
+          if (command && context.recentlyInterruptedTurnId === turnId) {
+            return Effect.void;
+          }
+          if (command) {
+            return failDetachedCommand(context, turnId, requestError);
+          }
+          return Effect.gen(function* () {
+            context.activeTurnId = undefined;
+            context.activeAgent = undefined;
+            context.activeVariant = undefined;
+            yield* updateProviderSession(
+              context,
+              {
+                status: "ready",
+                model: modelSelection?.model ?? context.session.model,
+                lastError: requestError.detail,
+              },
+              { clearActiveTurnId: true },
+            );
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: input.threadId,
+                turnId,
+              })),
+              type: "turn.aborted",
+              payload: {
+                reason: requestError.detail,
+              },
+            });
+          });
+        }),
       );
       if (command) {
         // Unlike `promptAsync`, OpenCode's command endpoint does not return
@@ -2173,45 +2254,70 @@ export function makeOpenCodeAdapter(
           { concurrency: "unbounded", discard: true },
         );
         const interruptedTurnId = turnId ?? context.activeTurnId;
-        const ownsInterruptedTurn =
-          interruptedTurnId !== undefined && context.activeTurnId === interruptedTurnId;
-        if (ownsInterruptedTurn) {
-          // Keep active-turn ownership while abort is in flight so a
-          // concurrent send remains steering for this turn. The marker keeps
-          // a detached command rejection from overwriting the interruption.
-          context.interruptingTurnIds.add(interruptedTurnId);
+        if (!interruptedTurnId) {
+          return yield* runOpenCodeSdk("session.abort", () =>
+            context.client.session.abort({ sessionID: context.openCodeSessionId }),
+          ).pipe(Effect.mapError(toRequestError));
         }
-        yield* runOpenCodeSdk("session.abort", () =>
-          context.client.session.abort({ sessionID: context.openCodeSessionId }),
-        ).pipe(
-          Effect.mapError(toRequestError),
-          Effect.tapError(() =>
-            ownsInterruptedTurn
-              ? Effect.sync(() => {
-                  context.interruptingTurnIds.delete(interruptedTurnId);
-                })
-              : Effect.void,
-          ),
-        );
-        // The idle event may win this race and emit the interrupted completion
-        // first. Deleting the marker is the one-shot claim for terminal state.
-        if (interruptedTurnId && context.interruptingTurnIds.delete(interruptedTurnId)) {
-          if (context.activeTurnId === interruptedTurnId) {
-            context.activeTurnId = undefined;
-            yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
-          }
-          yield* emit({
-            ...(yield* buildEventBase({
-              threadId,
-              turnId: interruptedTurnId,
-            })),
-            type: "turn.completed",
-            payload: {
-              state: "interrupted",
-              stopReason: "Interrupted by user.",
-            },
+
+        let attempt = context.interruptAttempt;
+        if (!attempt) {
+          attempt = {
+            turnId: interruptedTurnId,
+            completion: yield* Deferred.make<void, ProviderAdapterRequestError>(),
+            terminalClaimed: false,
+            pendingCommandError: undefined,
+          };
+          context.interruptAttempt = attempt;
+          const ownedAttempt = attempt;
+
+          const runInterrupt = Effect.gen(function* () {
+            const abortExit = yield* runOpenCodeSdk("session.abort", () =>
+              context.client.session.abort({ sessionID: context.openCodeSessionId }),
+            ).pipe(Effect.mapError(toRequestError), Effect.exit);
+
+            if (Exit.isSuccess(abortExit)) {
+              yield* completeInterruptedTurn(context, ownedAttempt);
+            }
+
+            if (context.interruptAttempt === ownedAttempt) {
+              context.interruptAttempt = undefined;
+            }
+
+            if (Exit.isFailure(abortExit) && !ownedAttempt.terminalClaimed) {
+              if (ownedAttempt.pendingCommandError) {
+                yield* failDetachedCommand(
+                  context,
+                  ownedAttempt.turnId,
+                  ownedAttempt.pendingCommandError,
+                );
+              }
+              yield* Deferred.failCause(ownedAttempt.completion, abortExit.cause);
+              return;
+            }
+
+            yield* Deferred.succeed(ownedAttempt.completion, undefined);
+          });
+
+          yield* runInterrupt.pipe(
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                if (context.interruptAttempt === ownedAttempt) {
+                  context.interruptAttempt = undefined;
+                }
+                yield* Deferred.failCause(ownedAttempt.completion, cause);
+              }),
+            ),
+            Effect.forkIn(context.sessionScope),
+          );
+        } else if (attempt.turnId !== interruptedTurnId) {
+          yield* Effect.logDebug("OpenCode interrupt joined the active interrupt attempt", {
+            requestedTurnId: interruptedTurnId,
+            activeInterruptTurnId: attempt.turnId,
           });
         }
+
+        return yield* Deferred.await(attempt.completion);
       },
     );
 
