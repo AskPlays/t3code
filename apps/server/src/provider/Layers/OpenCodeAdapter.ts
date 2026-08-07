@@ -819,7 +819,7 @@ export function makeOpenCodeAdapter(
       event: OpenCodeSubscribedEvent,
       status: Extract<RuntimeTaskStatus, "running" | "idle">,
     ) {
-      if (task.status === status) {
+      if (task.settled || task.status === status) {
         return;
       }
       task.status = status;
@@ -868,7 +868,9 @@ export function makeOpenCodeAdapter(
      * First-contact fallback for a session id that reached the pump without
      * a `session.created` (subscribed mid-run): probe the server once to
      * confirm parentage, register the task if it is a child, and remember
-     * non-children so foreign sessions cost at most one probe each.
+     * confirmed non-children so foreign sessions cost at most one probe
+     * each. Transient probe failures (network/5xx/auth) are NOT cached - the
+     * next event retries them.
      */
     const hydrateSubagentTask = Effect.fn("hydrateSubagentTask")(function* (
       context: OpenCodeSessionContext,
@@ -878,18 +880,35 @@ export function makeOpenCodeAdapter(
       if (context.nonSubagentSessions.has(sessionId)) {
         return;
       }
-      const response = yield* runOpenCodeSdk("session.get", () =>
+      const outcome = yield* runOpenCodeSdk("session.get", () =>
         context.client.session.get({ sessionID: sessionId }),
-      ).pipe(Effect.option);
-      const info = Option.isSome(response) ? response.value.data : undefined;
-      if (!info || info.parentID !== context.openCodeSessionId) {
-        context.nonSubagentSessions.add(sessionId);
+      ).pipe(
+        Effect.match({
+          onSuccess: (value) => ({ found: true as const, data: value.data }),
+          onFailure: (cause) =>
+            isOpenCodeNotFound(cause)
+              ? ({ found: false as const, confirmedMissing: true as const })
+              : ({ found: false as const, confirmedMissing: false as const }),
+        }),
+      );
+      if (outcome.found) {
+        if (!outcome.data) {
+          context.nonSubagentSessions.add(sessionId);
+          return;
+        }
+        if (outcome.data.parentID !== context.openCodeSessionId) {
+          context.nonSubagentSessions.add(sessionId);
+          return;
+        }
+        yield* ensureSubagentTask(context, sessionId, {
+          title: trimText(outcome.data.title),
+          role: trimText(outcome.data.agent),
+        });
         return;
       }
-      yield* ensureSubagentTask(context, sessionId, {
-        title: trimText(info.title),
-        role: trimText(info.agent),
-      });
+      if (outcome.confirmedMissing) {
+        context.nonSubagentSessions.add(sessionId);
+      }
     });
 
     /**
@@ -980,6 +999,8 @@ export function makeOpenCodeAdapter(
               taskId: task.taskId,
               description: task.title,
               typedUsage,
+              ...(task.role ? { role: task.role } : {}),
+              parentAgentId: context.openCodeSessionId,
               timelineBypass: true,
             },
           });
@@ -987,12 +1008,20 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.status": {
-          const task = context.subagentTasks.get(sessionId);
+          let task = context.subagentTasks.get(sessionId);
           if (!task) {
+            // First contact: hydrate, then apply THIS event (a first-contact
+            // idle or retry must not be swallowed by the registration probe).
             yield* hydrateSubagentTask(context, event, sessionId);
-            return;
+            task = context.subagentTasks.get(sessionId);
+            if (!task) {
+              return;
+            }
           }
-          if (event.properties.status.type === "busy") {
+          if (
+            event.properties.status.type === "busy" ||
+            event.properties.status.type === "retry"
+          ) {
             yield* emitSubagentTaskStatus(context, task, event, "running");
             return;
           }
@@ -1003,20 +1032,26 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.idle": {
-          const task = context.subagentTasks.get(sessionId);
+          let task = context.subagentTasks.get(sessionId);
           if (!task) {
             yield* hydrateSubagentTask(context, event, sessionId);
-            return;
+            task = context.subagentTasks.get(sessionId);
+            if (!task) {
+              return;
+            }
           }
           yield* emitSubagentTaskStatus(context, task, event, "idle");
           return;
         }
 
         case "session.error": {
-          const task = context.subagentTasks.get(sessionId);
+          let task = context.subagentTasks.get(sessionId);
           if (!task) {
             yield* hydrateSubagentTask(context, event, sessionId);
-            return;
+            task = context.subagentTasks.get(sessionId);
+            if (!task) {
+              return;
+            }
           }
           yield* settleSubagentTask(
             context,
@@ -1029,10 +1064,13 @@ export function makeOpenCodeAdapter(
         }
 
         case "message.part.updated": {
-          const task = context.subagentTasks.get(sessionId);
+          let task = context.subagentTasks.get(sessionId);
           if (!task) {
             yield* hydrateSubagentTask(context, event, sessionId);
-            return;
+            task = context.subagentTasks.get(sessionId);
+            if (!task) {
+              return;
+            }
           }
           if (task.settled || event.properties.part.type !== "tool") {
             return;
@@ -1050,6 +1088,8 @@ export function makeOpenCodeAdapter(
               description: task.title,
               ...(summary ? { summary } : {}),
               lastToolName: part.tool,
+              ...(task.role ? { role: task.role } : {}),
+              parentAgentId: context.openCodeSessionId,
               timelineBypass: true,
             },
           });

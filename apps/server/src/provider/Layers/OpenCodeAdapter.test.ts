@@ -1494,6 +1494,110 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("keeps a failed parented session settled against later busy events", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-settled");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_settled";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "session.error",
+          properties: { sessionID: sub, error: { data: { message: "boom" } } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "idle" } },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const statuses = events
+        .filter((event) => event.type === "task.updated")
+        .map((event) => (event.type === "task.updated" ? event.payload.status : undefined));
+      // Running, then failed - the post-failure busy/idle events must not
+      // reopen the settled row.
+      NodeAssert.deepEqual(statuses, ["running", "failed"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("maps a retry status to running for a parented session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-retry");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_retry";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "retry" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "idle" } },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const statuses = events
+        .filter((event) => event.type === "task.updated")
+        .map((event) => (event.type === "task.updated" ? event.payload.status : undefined));
+      NodeAssert.deepEqual(statuses, ["running", "idle"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("keeps dropping events for sessions that are neither owned nor parented", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
