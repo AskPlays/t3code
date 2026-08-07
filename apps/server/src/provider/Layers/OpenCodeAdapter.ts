@@ -7,6 +7,9 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
+  type RuntimeTaskStatus,
+  type RuntimeTaskUsage,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -217,6 +220,18 @@ interface OpenCodeSessionContext {
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
+  /**
+   * Parented (subagent) OpenCode sessions of this session, keyed by OpenCode
+   * session id, surfaced through the shared task.* lifecycle so the client
+   * fleet view and monitoring pills light up for OpenCode subagents.
+   */
+  readonly subagentTasks: Map<string, OpenCodeSubagentTask>;
+  /**
+   * Session ids confirmed NOT to be children of this session (from a failed
+   * hydration probe). One probe per foreign session keeps the cost of the
+   * missed-`session.created` fallback bounded.
+   */
+  readonly nonSubagentSessions: Set<string>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -235,6 +250,25 @@ interface OpenCodeSessionContext {
    *   - tears down the OpenCode server process for scope-owned servers.
    */
   readonly sessionScope: Scope.Closeable;
+}
+
+/**
+ * A parented (subagent) OpenCode session surfaced through the shared task.*
+ * lifecycle. `sessionId` is the OpenCode session id; `taskId` is the
+ * client-facing task identity (same value). `settled` guards the one-shot
+ * terminal transition so a late event can never reopen a settled row.
+ */
+interface OpenCodeSubagentTask {
+  readonly sessionId: string;
+  readonly taskId: RuntimeTaskId;
+  title: string;
+  role: string | undefined;
+  status: RuntimeTaskStatus | undefined;
+  settled: boolean;
+  latestTokensInput: number;
+  latestTokensOutput: number;
+  latestTokensReasoning: number;
+  latestTokensCacheRead: number;
 }
 
 export interface OpenCodeAdapterLiveOptions {
@@ -715,6 +749,318 @@ export function makeOpenCodeAdapter(
       yield* Scope.close(context.sessionScope, Exit.void);
     });
 
+    /**
+     * Lazily registers a parented OpenCode session as a task and emits its
+     * `task.started` row. First contact may be a status or part event when
+     * the pump missed the spawn (e.g. subscribed mid-run), so the task is
+     * created on demand with a generic title until a session event names it.
+     */
+    const ensureSubagentTask = Effect.fn("ensureSubagentTask")(function* (
+      context: OpenCodeSessionContext,
+      sessionId: string,
+      info?: { readonly title?: string | undefined; readonly role?: string | undefined },
+    ) {
+      const existing = context.subagentTasks.get(sessionId);
+      if (existing) {
+        if (!existing.settled) {
+          const title = trimText(info?.title);
+          const role = trimText(info?.role);
+          if (title && existing.title !== title) {
+            existing.title = title;
+          }
+          if (role && existing.role !== role) {
+            existing.role = role;
+          }
+        }
+        return existing;
+      }
+      const title = trimText(info?.title) ?? "subagent";
+      const role = trimText(info?.role);
+      const task: OpenCodeSubagentTask = {
+        sessionId,
+        taskId: RuntimeTaskId.make(sessionId),
+        title,
+        role,
+        status: undefined,
+        settled: false,
+        latestTokensInput: 0,
+        latestTokensOutput: 0,
+        latestTokensReasoning: 0,
+        latestTokensCacheRead: 0,
+      };
+      context.subagentTasks.set(sessionId, task);
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: context.session.threadId, raw: undefined })),
+        type: "task.started",
+        payload: {
+          taskId: task.taskId,
+          description: title,
+          title,
+          ...(role ? { role } : {}),
+          parentAgentId: context.openCodeSessionId,
+          timelineBypass: true,
+        },
+      });
+      return task;
+    });
+
+    const subagentTaskLinkage = (
+      task: OpenCodeSubagentTask,
+    ): { readonly title: string; readonly role?: string; readonly timelineBypass: true } => ({
+      title: task.title,
+      ...(task.role ? { role: task.role } : {}),
+      timelineBypass: true,
+    });
+
+    /** Non-terminal status transition (running/idle), deduplicated. */
+    const emitSubagentTaskStatus = Effect.fn("emitSubagentTaskStatus")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeSubagentTask,
+      event: OpenCodeSubscribedEvent,
+      status: Extract<RuntimeTaskStatus, "running" | "idle">,
+    ) {
+      if (task.status === status) {
+        return;
+      }
+      task.status = status;
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: context.session.threadId, raw: event })),
+        type: "task.updated",
+        payload: {
+          taskId: task.taskId,
+          status,
+          ...subagentTaskLinkage(task),
+        },
+      });
+    });
+
+    /**
+     * Terminal transition (failed/interrupted): settles the row so later
+     * events for the same session can never reopen it. `idle` is NOT
+     * terminal — the client fold treats a resting subagent as resumable and
+     * supports idle→running reactivation, matching the Codex adapter.
+     */
+    const settleSubagentTask = Effect.fn("settleSubagentTask")(function* (
+      context: OpenCodeSessionContext,
+      task: OpenCodeSubagentTask,
+      event: OpenCodeSubscribedEvent,
+      status: Extract<RuntimeTaskStatus, "failed" | "interrupted">,
+      error?: string,
+    ) {
+      if (task.settled) {
+        return;
+      }
+      task.settled = true;
+      task.status = status;
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: context.session.threadId, raw: event })),
+        type: "task.updated",
+        payload: {
+          taskId: task.taskId,
+          status,
+          ...(error ? { error } : {}),
+          ...subagentTaskLinkage(task),
+        },
+      });
+    });
+
+    /**
+     * First-contact fallback for a session id that reached the pump without
+     * a `session.created` (subscribed mid-run): probe the server once to
+     * confirm parentage, register the task if it is a child, and remember
+     * non-children so foreign sessions cost at most one probe each.
+     */
+    const hydrateSubagentTask = Effect.fn("hydrateSubagentTask")(function* (
+      context: OpenCodeSessionContext,
+      event: OpenCodeSubscribedEvent,
+      sessionId: string,
+    ) {
+      if (context.nonSubagentSessions.has(sessionId)) {
+        return;
+      }
+      const response = yield* runOpenCodeSdk("session.get", () =>
+        context.client.session.get({ sessionID: sessionId }),
+      ).pipe(Effect.option);
+      const info = Option.isSome(response) ? response.value.data : undefined;
+      if (!info || info.parentID !== context.openCodeSessionId) {
+        context.nonSubagentSessions.add(sessionId);
+        return;
+      }
+      yield* ensureSubagentTask(context, sessionId, {
+        title: trimText(info.title),
+        role: trimText(info.agent),
+      });
+    });
+
+    /**
+     * Routes events for sessions parented to this context's OpenCode session
+     * (subagent sessions) into the shared task.* lifecycle, mirroring the
+     * Codex/Claude adapters so the Agents fleet view and monitoring pills
+     * light up for OpenCode subagents. Events for sessions that are neither
+     * owned nor parented stay dropped, as before.
+     */
+    const handleSubagentEvent = Effect.fn("handleSubagentEvent")(function* (
+      context: OpenCodeSessionContext,
+      event: OpenCodeSubscribedEvent,
+      sessionId: string,
+    ) {
+      switch (event.type) {
+        case "session.created":
+        case "session.updated":
+        case "session.deleted": {
+          const info = event.properties.info;
+          if (info.parentID !== context.openCodeSessionId) {
+            return;
+          }
+          const beforeTitle = context.subagentTasks.get(info.id)?.title;
+          const beforeRole = context.subagentTasks.get(info.id)?.role;
+          const task = yield* ensureSubagentTask(context, info.id, {
+            title: trimText(info.title),
+            role: trimText(info.agent),
+          });
+          if (event.type === "session.created") {
+            return;
+          }
+          if (event.type === "session.deleted") {
+            // The parented session was removed upstream. Only surface the
+            // transition when nothing else already settled the row.
+            if (!task.settled) {
+              yield* settleSubagentTask(context, task, event, "interrupted");
+            }
+            return;
+          }
+          // session.updated: the agent role arrives after session.created —
+          // emit a metadata-bearing patch when the identity changed so the
+          // client fold never keeps a stale title/role.
+          if (!task.settled && (task.title !== beforeTitle || task.role !== beforeRole)) {
+            yield* emit({
+              ...(yield* buildEventBase({ threadId: context.session.threadId, raw: event })),
+              type: "task.updated",
+              payload: {
+                taskId: task.taskId,
+                ...subagentTaskLinkage(task),
+              },
+            });
+          }
+          // Surface token usage as progress rows. The ingestion marks
+          // typedUsage rows usageSnapshot, so they can never reopen a
+          // settled row — the final token count lands after the idle event
+          // and must still merge in.
+          const tokens = info.tokens;
+          const input = tokens?.input ?? 0;
+          const output = tokens?.output ?? 0;
+          const reasoning = tokens?.reasoning ?? 0;
+          const cacheRead = tokens?.cache.read ?? 0;
+          if (
+            input === task.latestTokensInput &&
+            output === task.latestTokensOutput &&
+            reasoning === task.latestTokensReasoning &&
+            cacheRead === task.latestTokensCacheRead
+          ) {
+            return;
+          }
+          task.latestTokensInput = input;
+          task.latestTokensOutput = output;
+          task.latestTokensReasoning = reasoning;
+          task.latestTokensCacheRead = cacheRead;
+          if (input + output + reasoning + cacheRead === 0) {
+            return;
+          }
+          const typedUsage: RuntimeTaskUsage = {
+            totalTokens: input + output + reasoning,
+            ...(input > 0 ? { inputTokens: input } : {}),
+            ...(output > 0 ? { outputTokens: output } : {}),
+            ...(reasoning > 0 ? { reasoningOutputTokens: reasoning } : {}),
+            ...(cacheRead > 0 ? { cachedInputTokens: cacheRead } : {}),
+          };
+          yield* emit({
+            ...(yield* buildEventBase({ threadId: context.session.threadId, raw: event })),
+            type: "task.progress",
+            payload: {
+              taskId: task.taskId,
+              description: task.title,
+              typedUsage,
+              timelineBypass: true,
+            },
+          });
+          return;
+        }
+
+        case "session.status": {
+          const task = context.subagentTasks.get(sessionId);
+          if (!task) {
+            yield* hydrateSubagentTask(context, event, sessionId);
+            return;
+          }
+          if (event.properties.status.type === "busy") {
+            yield* emitSubagentTaskStatus(context, task, event, "running");
+            return;
+          }
+          if (event.properties.status.type === "idle") {
+            yield* emitSubagentTaskStatus(context, task, event, "idle");
+          }
+          return;
+        }
+
+        case "session.idle": {
+          const task = context.subagentTasks.get(sessionId);
+          if (!task) {
+            yield* hydrateSubagentTask(context, event, sessionId);
+            return;
+          }
+          yield* emitSubagentTaskStatus(context, task, event, "idle");
+          return;
+        }
+
+        case "session.error": {
+          const task = context.subagentTasks.get(sessionId);
+          if (!task) {
+            yield* hydrateSubagentTask(context, event, sessionId);
+            return;
+          }
+          yield* settleSubagentTask(
+            context,
+            task,
+            event,
+            "failed",
+            sessionErrorMessage(event.properties.error),
+          );
+          return;
+        }
+
+        case "message.part.updated": {
+          const task = context.subagentTasks.get(sessionId);
+          if (!task) {
+            yield* hydrateSubagentTask(context, event, sessionId);
+            return;
+          }
+          if (task.settled || event.properties.part.type !== "tool") {
+            return;
+          }
+          const part = event.properties.part;
+          const summary =
+            "title" in part.state && typeof part.state.title === "string"
+              ? (trimText(part.state.title) ?? part.tool)
+              : part.tool;
+          yield* emit({
+            ...(yield* buildEventBase({ threadId: context.session.threadId, raw: event })),
+            type: "task.progress",
+            payload: {
+              taskId: task.taskId,
+              description: task.title,
+              ...(summary ? { summary } : {}),
+              lastToolName: part.tool,
+              timelineBypass: true,
+            },
+          });
+          return;
+        }
+
+        default:
+          return;
+      }
+    });
+
     /** Emit content.delta and item.completed events for an assistant text part. */
     const emitAssistantTextDelta = Effect.fn("emitAssistantTextDelta")(function* (
       context: OpenCodeSessionContext,
@@ -788,6 +1134,11 @@ export function makeOpenCodeAdapter(
     ) {
       const payloadSessionId = openCodeEventSessionId(event);
       if (payloadSessionId !== context.openCodeSessionId) {
+        // Parented (subagent) sessions of this session surface through the
+        // task.* lifecycle; everything else stays dropped.
+        if (payloadSessionId) {
+          yield* handleSubagentEvent(context, event, payloadSessionId);
+        }
         return;
       }
 
@@ -1386,6 +1737,8 @@ export function makeOpenCodeAdapter(
           activeVariant: undefined,
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
+          subagentTasks: new Map(),
+          nonSubagentSessions: new Set(),
         };
         sessions.set(input.threadId, context);
         yield* startEventPump(context);

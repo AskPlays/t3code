@@ -72,6 +72,7 @@ const runtimeMock = {
     missingSessionIds: new Set<string>(),
     transientErrorSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
+    sessionInfoById: new Map<string, Record<string, unknown>>(),
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
   },
@@ -159,7 +160,14 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             });
           }
           const directory = runtimeMock.state.sessionDirectoryById.get(sessionID);
-          return { data: { id: sessionID, ...(directory ? { directory } : {}) } };
+          const extraInfo = runtimeMock.state.sessionInfoById.get(sessionID);
+          return {
+            data: {
+              id: sessionID,
+              ...(directory ? { directory } : {}),
+              ...(extraInfo ? extraInfo : {}),
+            },
+          };
         },
         update: async ({ sessionID, permission }: { sessionID: string; permission: unknown }) => {
           runtimeMock.state.sessionUpdateCalls.push({ sessionID, permission });
@@ -1188,6 +1196,354 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       if (metadataUpdated.type === "thread.metadata.updated") {
         NodeAssert.equal(metadataUpdated.payload.name, "Investigate OpenCode title sync");
       }
+    }),
+  );
+
+  it.effect("surfaces parented subagent sessions through the task.* lifecycle", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-lifecycle");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_1";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: sub,
+            part: {
+              type: "tool",
+              tool: "bash",
+              callID: "call_1",
+              state: { status: "running", title: "git diff" },
+            },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "idle" } },
+        },
+        {
+          type: "session.idle",
+          properties: { sessionID: sub },
+        },
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: sub,
+            info: {
+              id: sub,
+              parentID: owned,
+              title: "review",
+              agent: "review",
+              tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 20, write: 0 } },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(8),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const types = events.map((event) => event.type);
+      NodeAssert.deepEqual(types, [
+        "session.started",
+        "thread.started",
+        "task.started",
+        "task.updated",
+        "task.progress",
+        "task.updated",
+        "task.updated",
+        "task.progress",
+      ]);
+
+      const started = events.find((event) => event.type === "task.started");
+      if (started?.type === "task.started") {
+        NodeAssert.equal(started.payload.taskId, sub);
+        NodeAssert.equal(started.payload.title, "review");
+        NodeAssert.equal(started.payload.parentAgentId, owned);
+        NodeAssert.equal(started.payload.timelineBypass, true);
+      }
+
+      const running = events.filter((event) => event.type === "task.updated")[0];
+      if (running?.type === "task.updated") {
+        NodeAssert.equal(running.payload.status, "running");
+      }
+
+      const toolProgress = events.filter((event) => event.type === "task.progress")[0];
+      if (toolProgress?.type === "task.progress") {
+        NodeAssert.equal(toolProgress.payload.lastToolName, "bash");
+        NodeAssert.equal(toolProgress.payload.summary, "git diff");
+      }
+
+      const idle = events.filter((event) => event.type === "task.updated")[1];
+      if (idle?.type === "task.updated") {
+        NodeAssert.equal(idle.payload.status, "idle");
+      }
+
+      // The final token count lands after the idle transition and still merges.
+      const usage = events.filter((event) => event.type === "task.progress")[1];
+      if (usage?.type === "task.progress" && usage.payload.typedUsage) {
+        NodeAssert.equal(usage.payload.typedUsage.totalTokens, 160);
+        NodeAssert.equal(usage.payload.typedUsage.cachedInputTokens, 20);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("marks a failed parented session as task.failed with the error message", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-error");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_failed";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+        {
+          type: "session.error",
+          properties: {
+            sessionID: sub,
+            error: { data: { message: "provider blew up" } },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const failed = events.filter((event) => event.type === "task.updated")[0];
+      NodeAssert.ok(failed, "expected a task.updated event for the failed subagent");
+      if (failed?.type === "task.updated") {
+        NodeAssert.equal(failed.payload.status, "failed");
+        NodeAssert.equal(failed.payload.error, "provider blew up");
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reactivates an idled parented session as running on the next busy event", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-reactivate");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_reactivate";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "idle" } },
+        },
+        {
+          type: "session.idle",
+          properties: { sessionID: sub },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const statuses = events
+        .filter((event) => event.type === "task.updated")
+        .map((event) => (event.type === "task.updated" ? event.payload.status : undefined));
+      NodeAssert.deepEqual(statuses, ["running", "idle", "running"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("hydrates a parented session whose created event was missed", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subagent-hydrate");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_subagent_late";
+      runtimeMock.state.sessionInfoById.set(sub, {
+        id: sub,
+        parentID: owned,
+        title: "review",
+        agent: "review",
+      });
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "busy" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: sub, status: { type: "idle" } },
+        },
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: sub,
+            info: {
+              id: sub,
+              parentID: owned,
+              title: "review",
+              agent: "review",
+              tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.ok(runtimeMock.state.sessionGetIds.includes(sub), "expected a session.get probe");
+      const types = events.map((event) => event.type);
+      NodeAssert.deepEqual(types, [
+        "session.started",
+        "thread.started",
+        "task.started",
+        "task.updated",
+        "task.updated",
+        "task.progress",
+      ]);
+      const started = events.find((event) => event.type === "task.started");
+      if (started?.type === "task.started") {
+        NodeAssert.equal(started.payload.title, "review");
+        NodeAssert.equal(started.payload.role, "review");
+      }
+      const statuses = events
+        .filter((event) => event.type === "task.updated")
+        .map((event) => (event.type === "task.updated" ? event.payload.status : undefined));
+      NodeAssert.deepEqual(statuses, ["running", "idle"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("keeps dropping events for sessions that are neither owned nor parented", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-foreign-subagent");
+      const owned = "http://127.0.0.1:9999/session";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: "ses_foreign",
+            info: { id: "ses_foreign", parentID: "ses_some_other_parent", title: "x" },
+          },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_foreign", status: { type: "busy" } },
+        },
+        {
+          type: "session.status",
+          properties: { sessionID: "ses_foreign", status: { type: "idle" } },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "ses_foreign",
+            part: { type: "tool", tool: "bash", callID: "call_1", state: { status: "running" } },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["session.started", "thread.started"],
+      );
+
+      yield* adapter.stopSession(threadId);
     }),
   );
 
