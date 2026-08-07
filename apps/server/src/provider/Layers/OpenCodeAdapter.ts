@@ -806,9 +806,16 @@ export function makeOpenCodeAdapter(
 
     const subagentTaskLinkage = (
       task: OpenCodeSubagentTask,
-    ): { readonly title: string; readonly role?: string; readonly timelineBypass: true } => ({
+      parentAgentId: string,
+    ): {
+      readonly title: string;
+      readonly role?: string;
+      readonly parentAgentId: string;
+      readonly timelineBypass: true;
+    } => ({
       title: task.title,
       ...(task.role ? { role: task.role } : {}),
+      parentAgentId,
       timelineBypass: true,
     });
 
@@ -829,7 +836,7 @@ export function makeOpenCodeAdapter(
         payload: {
           taskId: task.taskId,
           status,
-          ...subagentTaskLinkage(task),
+          ...subagentTaskLinkage(task, context.openCodeSessionId),
         },
       });
     });
@@ -859,7 +866,7 @@ export function makeOpenCodeAdapter(
           taskId: task.taskId,
           status,
           ...(error ? { error } : {}),
-          ...subagentTaskLinkage(task),
+          ...subagentTaskLinkage(task, context.openCodeSessionId),
         },
       });
     });
@@ -957,7 +964,7 @@ export function makeOpenCodeAdapter(
               type: "task.updated",
               payload: {
                 taskId: task.taskId,
-                ...subagentTaskLinkage(task),
+                ...subagentTaskLinkage(task, context.openCodeSessionId),
               },
             });
           }
@@ -999,6 +1006,10 @@ export function makeOpenCodeAdapter(
               taskId: task.taskId,
               description: task.title,
               typedUsage,
+              // Carry the current status so a post-idle token update cannot
+              // re-classify the task as active (ingestion records progress as
+              // live unless the payload pins a status).
+              ...(task.status ? { status: task.status } : {}),
               ...(task.role ? { role: task.role } : {}),
               parentAgentId: context.openCodeSessionId,
               timelineBypass: true,
@@ -1088,6 +1099,7 @@ export function makeOpenCodeAdapter(
               description: task.title,
               ...(summary ? { summary } : {}),
               lastToolName: part.tool,
+              ...(task.status ? { status: task.status } : {}),
               ...(task.role ? { role: task.role } : {}),
               parentAgentId: context.openCodeSessionId,
               timelineBypass: true,
@@ -2112,3 +2124,4 @@ export function makeOpenCodeAdapter(
     } satisfies OpenCodeAdapterShape;
   });
 }
+
