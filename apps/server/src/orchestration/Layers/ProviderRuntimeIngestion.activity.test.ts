@@ -79,6 +79,10 @@ describe("runtimeEventToActivities task progress", () => {
     expect(progressPayload).not.toHaveProperty("typedUsage");
     expect(usagePayload.typedUsage).toEqual({ totalTokens: 4_200, toolUses: 7 });
     expect(usagePayload.usageSnapshot).toBe(true);
-    expect(usagePayload).not.toHaveProperty("status");
+    // Retention regression: the usage snapshot must carry the adapter's
+    // pinned status. If the paired progress row ages out of activity
+    // retention first, the client fold reconstructs a usage-only row as
+    // "running" unless the snapshot pins the real status itself.
+    expect(usagePayload.status).toBe("running");
   });
 });

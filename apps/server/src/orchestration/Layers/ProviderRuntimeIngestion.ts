@@ -630,6 +630,11 @@ export function runtimeEventToActivities(
                   taskId: event.payload.taskId,
                   ...title,
                   ...identityLinkage,
+                  // Preserve the adapter's pinned status: if the paired
+                  // summary progress row ages out of activity retention, the
+                  // client fold reconstructs a usage-only row as "running"
+                  // unless the snapshot pins the real status itself.
+                  ...(event.payload.status ? { status: event.payload.status } : {}),
                   usageSnapshot: true,
                   typedUsage: event.payload.typedUsage,
                 },

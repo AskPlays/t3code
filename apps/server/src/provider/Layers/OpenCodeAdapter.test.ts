@@ -93,6 +93,7 @@ const runtimeMock = {
     this.state.missingSessionIds.clear();
     this.state.transientErrorSessionIds.clear();
     this.state.sessionDirectoryById.clear();
+    this.state.sessionInfoById.clear();
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
   },
@@ -1286,12 +1287,12 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         NodeAssert.equal(started.payload.timelineBypass, true);
       }
 
-      const running = events.filter((event) => event.type === "task.updated")[0];
+      const running = events.find((event) => event.type === "task.updated");
       if (running?.type === "task.updated") {
         NodeAssert.equal(running.payload.status, "running");
       }
 
-      const toolProgress = events.filter((event) => event.type === "task.progress")[0];
+      const toolProgress = events.find((event) => event.type === "task.progress");
       if (toolProgress?.type === "task.progress") {
         NodeAssert.equal(toolProgress.payload.lastToolName, "bash");
         NodeAssert.equal(toolProgress.payload.summary, "git diff");
@@ -1350,7 +1351,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
 
       const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
-      const failed = events.filter((event) => event.type === "task.updated")[0];
+      const failed = events.find((event) => event.type === "task.updated");
       NodeAssert.ok(failed, "expected a task.updated event for the failed subagent");
       if (failed?.type === "task.updated") {
         NodeAssert.equal(failed.payload.status, "failed");
@@ -1835,3 +1836,5 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 });
+
+
