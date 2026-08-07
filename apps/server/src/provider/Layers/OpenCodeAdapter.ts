@@ -976,7 +976,7 @@ export function makeOpenCodeAdapter(
           const input = tokens?.input ?? 0;
           const output = tokens?.output ?? 0;
           const reasoning = tokens?.reasoning ?? 0;
-          const cacheRead = tokens?.cache.read ?? 0;
+          const cacheRead = tokens?.cache?.read ?? 0;
           if (
             input === task.latestTokensInput &&
             output === task.latestTokensOutput &&
