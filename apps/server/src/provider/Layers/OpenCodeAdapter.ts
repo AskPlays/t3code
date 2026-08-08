@@ -580,6 +580,18 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
     return false;
   }
 
+  // Best-effort remote abort of every live parented (subagent) session too:
+  // stopping the thread's session must also stop its fleet, or the subagents
+  // keep burning tokens and their task rows keep background liveness alive.
+  yield* Effect.forEach(
+    [...context.subagentTasks.values()],
+    (task) =>
+      runOpenCodeSdk("session.abort", () =>
+        context.client.session.abort({ sessionID: task.sessionId }),
+      ).pipe(Effect.ignore({ log: true })),
+    { concurrency: "unbounded", discard: true },
+  );
+
   // Best-effort remote abort. The scope close below tears down the local
   // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
   // but we still want to tell OpenCode that this session is done.
@@ -1945,6 +1957,18 @@ export function makeOpenCodeAdapter(
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = yield* ensureSessionContext(sessions, threadId);
+        // Stop every live parented (subagent) session first: the stop-
+        // everything interrupt must kill background fleet work, not just the
+        // active turn, or the task rows keep background liveness alive and
+        // the client's "Stopping..." banner never resolves.
+        yield* Effect.forEach(
+          [...context.subagentTasks.values()],
+          (task) =>
+            runOpenCodeSdk("session.abort", () =>
+              context.client.session.abort({ sessionID: task.sessionId }),
+            ).pipe(Effect.ignore({ log: true })),
+          { concurrency: "unbounded", discard: true },
+        );
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));

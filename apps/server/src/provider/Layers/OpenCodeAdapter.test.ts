@@ -1599,6 +1599,46 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("interrupt aborts tracked subagent sessions along with the owned session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-interrupt-subagents");
+      const owned = "http://127.0.0.1:9999/session";
+      const sub = "ses_interrupt_child";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.created",
+          properties: {
+            sessionID: sub,
+            info: { id: sub, parentID: owned, title: "review" },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      // Wait until the pump registered the subagent task (session.started,
+      // thread.started, task.started).
+      yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second"));
+
+      yield* adapter.interruptTurn(threadId, undefined);
+
+      NodeAssert.deepEqual(runtimeMock.state.abortCalls.sort(), [owned, sub].sort());
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("keeps dropping events for sessions that are neither owned nor parented", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
