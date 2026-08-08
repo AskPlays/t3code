@@ -957,7 +957,12 @@ export function makeOpenCodeAdapter(
             role: trimText(info.agent),
           });
           if (event.type === "session.created") {
-            return;
+            // A replayed session.created (mid-run subscribe) can carry
+            // tokens. Fall through to the usage block so that tick is not
+            // lost until the next session.updated.
+            if (!info.tokens || (info.tokens.input + info.tokens.output + info.tokens.reasoning + info.tokens.cache.read) === 0) {
+              return;
+            }
           }
           if (event.type === "session.deleted") {
             // The parented session was removed upstream. Only surface the
