@@ -4,9 +4,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
-import { describe, expect, it } from "@effect/vitest";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 
-import { parseOpenCodeUsageRow, readOpenCodeUsage } from "./usageOpenCode.ts";
+import {
+  parseOpenCodeUsageRow,
+  readOpenCodeUsage,
+  resolveOpenCodeDatabasePath,
+} from "./usageOpenCode.ts";
 
 function row(overrides: Record<string, unknown> = {}) {
   return {
@@ -138,5 +142,91 @@ describe("readOpenCodeUsage", () => {
       database?.close();
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("does not count zero-token placeholders as malformed", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-opencode-usage-"));
+    const databasePath = NodePath.join(directory, "opencode.db");
+    let database: NodeSqlite.DatabaseSync | undefined;
+    try {
+      database = new NodeSqlite.DatabaseSync(databasePath);
+      database.exec(`
+        CREATE TABLE message (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          time_created INTEGER NOT NULL,
+          data TEXT NOT NULL
+        )
+      `);
+      const insert = database.prepare(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+      );
+      insert.run(
+        "msg_placeholder",
+        "ses_01",
+        2000,
+        JSON.stringify({
+          role: "assistant",
+          providerID: "opencode-go",
+          modelID: "deepseek-v4-flash",
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          cost: 0,
+        }),
+      );
+      insert.run(
+        "msg_broken",
+        "ses_01",
+        2001,
+        JSON.stringify({ role: "assistant", tokens: { input: 1, output: 1 } }),
+      );
+      database.close();
+      database = undefined;
+
+      const result = await readOpenCodeUsage(databasePath, 1500);
+
+      expect(result?.records).toHaveLength(0);
+      // Only the structurally-broken row is malformed; the placeholder is not.
+      expect(result?.malformedRecords).toBe(1);
+    } finally {
+      database?.close();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveOpenCodeDatabasePath", () => {
+  const previous = process.env.OPENCODE_DB;
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.OPENCODE_DB;
+    else process.env.OPENCODE_DB = previous;
+  });
+
+  it("defaults to opencode.db in the data directory", () => {
+    delete process.env.OPENCODE_DB;
+    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(
+      NodePath.join("data", "opencode", "opencode.db"),
+    );
+  });
+
+  it("uses an absolute OPENCODE_DB override verbatim", () => {
+    process.env.OPENCODE_DB = "D:\\other\\usage.db";
+    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(
+      "D:\\other\\usage.db",
+    );
+  });
+
+  it("resolves a relative OPENCODE_DB override against the data directory", () => {
+    process.env.OPENCODE_DB = "channel.db";
+    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(
+      NodePath.join("data", "opencode", "channel.db"),
+    );
+  });
+
+  it("ignores a :memory: override (nothing to read)", () => {
+    process.env.OPENCODE_DB = ":memory:";
+    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(
+      NodePath.join("data", "opencode", "opencode.db"),
+    );
   });
 });

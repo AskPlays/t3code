@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 /**
  * Read-only OpenCode usage database access.
  *
@@ -7,6 +8,8 @@
  *
  * @module usageOpenCode
  */
+import * as NodePath from "node:path";
+
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 // Kept non-literal so the Node-targeted bundle leaves Bun's runtime module
@@ -74,6 +77,22 @@ function nonNegativeInt(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
 }
 
+/**
+ * Resolves the OpenCode usage database path, mirroring opencode's own
+ * resolution (`packages/core/src/database/database.ts`): an `OPENCODE_DB`
+ * override wins (absolute paths are used verbatim, relative ones resolve
+ * against the data dir), otherwise the stable-channel `opencode.db` is used.
+ * Channel-specific names (`opencode-<channel>.db`) are not handled here; the
+ * installs this server targets use stable channels.
+ */
+export function resolveOpenCodeDatabasePath(dataDir: string): string {
+  const override = process.env.OPENCODE_DB?.trim();
+  if (override !== undefined && override.length > 0 && override !== ":memory:") {
+    return NodePath.isAbsolute(override) ? override : NodePath.join(dataDir, override);
+  }
+  return NodePath.join(dataDir, "opencode.db");
+}
+
 function finiteNonNegative(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
@@ -130,6 +149,27 @@ export function parseOpenCodeUsageRow(value: unknown): UsageRecord | null {
   };
 }
 
+/**
+ * Whether a row is a legitimate zero-token placeholder rather than a malformed
+ * one. OpenCode writes placeholder assistant rows (valid identity and model,
+ * zero tokens, cost 0) for aborted or empty attempts; these are intentionally
+ * ignored and must not mark the source `partial`.
+ */
+export function isOpenCodePlaceholderRow(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as OpenCodeUsageRow;
+  if (typeof row.providerId !== "string" || row.providerId.length === 0) return false;
+  if (typeof row.modelId !== "string" || row.modelId.length === 0) return false;
+  return (
+    nonNegativeInt(row.inputTokens) +
+      nonNegativeInt(row.outputTokens) +
+      nonNegativeInt(row.reasoningTokens) +
+      nonNegativeInt(row.cacheReadTokens) +
+      nonNegativeInt(row.cacheWriteTokens) ===
+    0
+  );
+}
+
 async function openDatabase(databasePath: string): Promise<SqliteDatabase> {
   if (process.versions.bun !== undefined) {
     const { Database } = (await import(BUN_SQLITE_MODULE_ID)) as typeof import("bun:sqlite");
@@ -170,8 +210,13 @@ export async function readOpenCodeUsage(
     let malformedRecords = 0;
     for (const row of rows) {
       const record = parseOpenCodeUsageRow(row);
-      if (record === null) malformedRecords += 1;
-      else records.push(record);
+      if (record === null) {
+        // Placeholders are expected on every install; only rows that are not
+        // even valid placeholders count as malformed.
+        if (!isOpenCodePlaceholderRow(row)) malformedRecords += 1;
+      } else {
+        records.push(record);
+      }
     }
 
     const [malformed] = database.statement(OPEN_CODE_MALFORMED_QUERY).all(sinceMs);

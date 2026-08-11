@@ -39,7 +39,7 @@ import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
-import { readOpenCodeUsage } from "./usageOpenCode.ts";
+import { readOpenCodeUsage, resolveOpenCodeDatabasePath } from "./usageOpenCode.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -233,7 +233,7 @@ export const make = Effect.gen(function* () {
       {
         provider: "opencode" as const,
         dir: openCodeDataDir,
-        databasePath: path.join(openCodeDataDir, "opencode.db"),
+        databasePath: resolveOpenCodeDatabasePath(openCodeDataDir),
         kind: "opencodeSqlite" as const,
       },
     ];
