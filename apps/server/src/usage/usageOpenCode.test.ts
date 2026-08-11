@@ -68,6 +68,19 @@ describe("parseOpenCodeUsageRow", () => {
         }),
       ),
     ).toBeNull();
+    // Placeholder rows report zero tokens and cost 0; they must not count.
+    expect(
+      parseOpenCodeUsageRow(
+        row({
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd: 0,
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

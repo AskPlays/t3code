@@ -106,10 +106,10 @@ export function parseOpenCodeUsageRow(value: unknown): UsageRecord | null {
   // shared contract treats reasoning as a subset of output, so combine them in
   // outputTokens while retaining the reasoning slice for the token-mix UI.
   const outputTokens = generatedOutputTokens + reasoningTokens;
-  if (
-    uncachedInputTokens + cachedInputTokens + cacheCreationTokens + outputTokens === 0 &&
-    finiteNonNegative(row.costUsd) === null
-  ) {
+  // Zero-token rows are rejected regardless of reported cost: OpenCode writes
+  // placeholder assistant rows (zero tokens, cost 0) that must not inflate
+  // record or session counts. Zero-cost rows with real token usage still pass.
+  if (uncachedInputTokens + cachedInputTokens + cacheCreationTokens + outputTokens === 0) {
     return null;
   }
 
