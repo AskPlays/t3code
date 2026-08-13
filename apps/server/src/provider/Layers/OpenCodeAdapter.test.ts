@@ -37,6 +37,7 @@ import {
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
   mergeOpenCodeAssistantText,
+  resolveOpenCodeModelContextLimit,
 } from "./OpenCodeAdapter.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* OpenCodeAdapter`.
@@ -75,6 +76,9 @@ const runtimeMock = {
     sessionInfoById: new Map<string, Record<string, unknown>>(),
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    providersCalls: 0 as number,
+    providersResponse: [] as unknown[],
+    providersError: null as Error | null,
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -96,6 +100,9 @@ const runtimeMock = {
     this.state.sessionInfoById.clear();
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
+    this.state.providersCalls = 0;
+    this.state.providersResponse = [];
+    this.state.providersError = null;
   },
 };
 
@@ -220,6 +227,15 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             }
           })(),
         }),
+      },
+      config: {
+        providers: async () => {
+          runtimeMock.state.providersCalls += 1;
+          if (runtimeMock.state.providersError) {
+            throw runtimeMock.state.providersError;
+          }
+          return { data: { providers: runtimeMock.state.providersResponse } };
+        },
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
   loadOpenCodeInventory: () =>
@@ -1875,5 +1891,307 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(closeCallsDuringRun, []);
     }),
   );
-});
 
+  it.effect("resolves the model context limit from a config.providers catalog", () =>
+    Effect.sync(() => {
+      const providers = [
+        {
+          id: "openai",
+          models: {
+            "gpt-5": { id: "gpt-5", limit: { context: 400000, output: 128000 } },
+            "gpt-5-mini": { id: "gpt-5-mini", limit: { context: 268288, output: 128000 } },
+          },
+        },
+        {
+          id: "anthropic",
+          models: {
+            "claude-opus-4-5": {
+              id: "claude-opus-4-5",
+              limit: { context: 200000, output: 32000 },
+            },
+          },
+        },
+      ];
+
+      NodeAssert.equal(resolveOpenCodeModelContextLimit(providers, "openai", "gpt-5"), 400000);
+      NodeAssert.equal(
+        resolveOpenCodeModelContextLimit(providers, "anthropic", "claude-opus-4-5"),
+        200000,
+      );
+      // Unknown model or provider, a missing limit block, and non-catalog
+      // entries all degrade to null rather than guessing a window size.
+      NodeAssert.equal(resolveOpenCodeModelContextLimit(providers, "openai", "gpt-4o"), null);
+      NodeAssert.equal(resolveOpenCodeModelContextLimit(providers, "unknown", "gpt-5"), null);
+      NodeAssert.equal(
+        resolveOpenCodeModelContextLimit(
+          [{ id: "openai", models: { "gpt-5": { id: "gpt-5" } } }],
+          "openai",
+          "gpt-5",
+        ),
+        null,
+      );
+      // A sub-token context (truncates to 0) must not violate the positive
+      // `maxTokens` contract.
+      NodeAssert.equal(
+        resolveOpenCodeModelContextLimit(
+          [{ id: "openai", models: { "gpt-5": { id: "gpt-5", limit: { context: 0.5 } } } }],
+          "openai",
+          "gpt-5",
+        ),
+        null,
+      );
+      NodeAssert.equal(
+        resolveOpenCodeModelContextLimit([null, 42, "junk"], "openai", "gpt-5"),
+        null,
+      );
+    }),
+  );
+
+  it.effect("emits thread.token-usage.updated with the context limit for the owned session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-context-window");
+      runtimeMock.state.providersResponse = [
+        {
+          id: "openai",
+          models: {
+            "gpt-5": { id: "gpt-5", limit: { context: 400000, output: 128000 } },
+          },
+        },
+      ];
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: {
+              id: "http://127.0.0.1:9999/session",
+              model: { id: "gpt-5", providerID: "openai" },
+              tokens: {
+                input: 1000,
+                output: 500,
+                reasoning: 200,
+                cache: { read: 300, write: 0 },
+              },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const usage = events.find((event) => event.type === "thread.token-usage.updated");
+      NodeAssert.ok(usage);
+      if (usage.type === "thread.token-usage.updated") {
+        NodeAssert.deepEqual(usage.payload.usage, {
+          // input 1000 + cache read 300 + output 500 + reasoning 200, delta
+          // against a fresh session's zero baseline.
+          usedTokens: 2000,
+          totalProcessedTokens: 2000,
+          maxTokens: 400000,
+          inputTokens: 1000,
+          cachedInputTokens: 300,
+          outputTokens: 500,
+          reasoningOutputTokens: 200,
+        });
+      }
+      NodeAssert.equal(runtimeMock.state.providersCalls, 1);
+    }),
+  );
+
+  it.effect("does not re-emit token usage when session.updated repeats unchanged totals", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-context-window-dedupe");
+      runtimeMock.state.providersResponse = [
+        {
+          id: "openai",
+          models: {
+            "gpt-5": { id: "gpt-5", limit: { context: 400000, output: 128000 } },
+          },
+        },
+      ];
+      const ownedInfo = (tokens: unknown) => ({
+        id: "http://127.0.0.1:9999/session",
+        model: { id: "gpt-5", providerID: "openai" },
+        tokens,
+      });
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: ownedInfo({
+              input: 100,
+              output: 50,
+              reasoning: 10,
+              cache: { read: 20, write: 0 },
+            }),
+          },
+        },
+        // Identical totals: must not produce a second emission.
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: ownedInfo({
+              input: 100,
+              output: 50,
+              reasoning: 10,
+              cache: { read: 20, write: 0 },
+            }),
+          },
+        },
+        // Changed totals: one more emission, so exactly two in total.
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: ownedInfo({
+              input: 200,
+              output: 50,
+              reasoning: 10,
+              cache: { read: 20, write: 0 },
+            }),
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "thread.token-usage.updated"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      // `usedTokens` is the per-event delta (180, then 100); the session's
+      // cumulative total is reported separately as `totalProcessedTokens`.
+      NodeAssert.deepEqual(
+        events.map((event) =>
+          event.type === "thread.token-usage.updated" ? event.payload.usage.usedTokens : 0,
+        ),
+        [180, 100],
+      );
+      NodeAssert.deepEqual(
+        events.map((event) =>
+          event.type === "thread.token-usage.updated"
+            ? event.payload.usage.totalProcessedTokens
+            : 0,
+        ),
+        [180, 280],
+      );
+    }),
+  );
+
+  it.effect("emits token usage without maxTokens when the catalog lacks the model", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-context-window-no-model");
+      runtimeMock.state.providersResponse = [
+        {
+          id: "anthropic",
+          models: {
+            "claude-opus-4-5": { id: "claude-opus-4-5", limit: { context: 200000, output: 32000 } },
+          },
+        },
+      ];
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: {
+              id: "http://127.0.0.1:9999/session",
+              model: { id: "gpt-5", providerID: "openai" },
+              tokens: { input: 500, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const usage = events.find((event) => event.type === "thread.token-usage.updated");
+      NodeAssert.ok(usage);
+      if (usage.type === "thread.token-usage.updated") {
+        NodeAssert.equal(usage.payload.usage.usedTokens, 600);
+        NodeAssert.equal("maxTokens" in usage.payload.usage, false);
+      }
+    }),
+  );
+
+  it.effect("emits token usage without maxTokens when config.providers fails", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-context-window-providers-fail");
+      runtimeMock.state.providersError = new Error("catalog unavailable");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "session.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            info: {
+              id: "http://127.0.0.1:9999/session",
+              model: { id: "gpt-5", providerID: "openai" },
+              tokens: { input: 500, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const usage = events.find((event) => event.type === "thread.token-usage.updated");
+      NodeAssert.ok(usage);
+      if (usage.type === "thread.token-usage.updated") {
+        NodeAssert.equal(usage.payload.usage.usedTokens, 600);
+        NodeAssert.equal("maxTokens" in usage.payload.usage, false);
+      }
+      NodeAssert.equal(runtimeMock.state.providersCalls, 1);
+    }),
+  );
+});

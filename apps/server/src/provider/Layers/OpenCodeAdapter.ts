@@ -11,6 +11,7 @@ import {
   type RuntimeTaskStatus,
   type RuntimeTaskUsage,
   ThreadId,
+  type ThreadTokenUsageSnapshot,
   type ToolLifecycleItemType,
   TurnId,
   type UserInputQuestion,
@@ -171,6 +172,38 @@ interface OpenCodeTurnSnapshot {
   readonly items: Array<unknown>;
 }
 
+/**
+ * Resolves a model's context-window token limit from an OpenCode
+ * `config.providers()` catalog. The catalog shape is the SDK's
+ * `Provider.models[modelID].limit.context`; the input stays `unknown[]` so
+ * the lookup never trusts an untrusted wire payload. Returns the truncated
+ * positive limit or `null` — a null limit degrades the context-window meter
+ * to token counts only, never a guess. Exported for unit testing.
+ */
+export function resolveOpenCodeModelContextLimit(
+  providers: readonly unknown[],
+  providerID: string,
+  modelID: string,
+): number | null {
+  for (const providerEntry of providers) {
+    if (typeof providerEntry !== "object" || providerEntry === null) continue;
+    const provider = providerEntry as { readonly id?: unknown; readonly models?: unknown };
+    if (provider.id !== providerID) continue;
+    if (typeof provider.models !== "object" || provider.models === null) return null;
+    const modelEntry = (provider.models as Record<string, unknown>)[modelID];
+    if (typeof modelEntry !== "object" || modelEntry === null) return null;
+    const limit = (modelEntry as { readonly limit?: unknown }).limit;
+    if (typeof limit !== "object" || limit === null) return null;
+    const context = (limit as { readonly context?: unknown }).context;
+    if (typeof context === "number" && Number.isFinite(context) && context > 0) {
+      const truncated = Math.trunc(context);
+      return truncated >= 1 ? truncated : null;
+    }
+    return null;
+  }
+  return null;
+}
+
 type OpenCodeSubscribedEvent =
   Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>> extends {
     readonly stream: AsyncIterable<infer TEvent>;
@@ -235,6 +268,25 @@ interface OpenCodeSessionContext {
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
+  /**
+   * Cumulative token totals last observed for the owned session. OpenCode
+   * reports session totals that only grow (compaction summarises but never
+   * removes message tokens), so the delta against this baseline is the
+   * current-turn usage and the absolute value is the all-time processed
+   * total. Seeded from the adopted session's existing totals on resume.
+   */
+  latestTokensInput: number;
+  latestTokensOutput: number;
+  latestTokensReasoning: number;
+  latestTokensCacheRead: number;
+  latestTokensCacheWrite: number;
+  /**
+   * `config.providers()` catalog for this session's OpenCode server, fetched
+   * lazily on the first token snapshot. `undefined` means not fetched yet; a
+   * failed fetch is cached as `[]` so a broken catalog call cannot retry on
+   * every session update.
+   */
+  modelProviders: readonly unknown[] | undefined;
   /**
    * One-shot guard flipped by `stopOpenCodeContext` / `emitUnexpectedExit`.
    * The session lifecycle is owned by `sessionScope`; this Ref exists only
@@ -906,8 +958,8 @@ export function makeOpenCodeAdapter(
           onSuccess: (value) => ({ found: true as const, data: value.data }),
           onFailure: (cause) =>
             isOpenCodeNotFound(cause)
-              ? ({ found: false as const, confirmedMissing: true as const })
-              : ({ found: false as const, confirmedMissing: false as const }),
+              ? { found: false as const, confirmedMissing: true as const }
+              : { found: false as const, confirmedMissing: false as const },
         }),
       );
       if (outcome.found) {
@@ -960,7 +1012,14 @@ export function makeOpenCodeAdapter(
             // A replayed session.created (mid-run subscribe) can carry
             // tokens. Fall through to the usage block so that tick is not
             // lost until the next session.updated.
-            if (!info.tokens || (info.tokens.input + info.tokens.output + info.tokens.reasoning + info.tokens.cache.read) === 0) {
+            if (
+              !info.tokens ||
+              info.tokens.input +
+                info.tokens.output +
+                info.tokens.reasoning +
+                info.tokens.cache.read ===
+                0
+            ) {
               return;
             }
           }
@@ -1046,10 +1105,7 @@ export function makeOpenCodeAdapter(
               return;
             }
           }
-          if (
-            event.properties.status.type === "busy" ||
-            event.properties.status.type === "retry"
-          ) {
+          if (event.properties.status.type === "busy" || event.properties.status.type === "retry") {
             yield* emitSubagentTaskStatus(context, task, event, "running");
             return;
           }
@@ -1197,6 +1253,27 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    /**
+     * Loads the session's `config.providers()` catalog exactly once. A failed
+     * call caches as an empty catalog: the context-window meter then shows
+     * token counts without a window percentage, and the failure is never
+     * retried on every subsequent session update.
+     */
+    const ensureModelProviders = (
+      context: OpenCodeSessionContext,
+    ): Effect.Effect<readonly unknown[], never> =>
+      context.modelProviders !== undefined
+        ? Effect.succeed(context.modelProviders)
+        : runOpenCodeSdk("config.providers", () => context.client.config.providers()).pipe(
+            Effect.map((response) => response.data?.providers ?? []),
+            Effect.catchCause(() => Effect.succeed([] as readonly unknown[])),
+            Effect.tap((providers) =>
+              Effect.sync(() => {
+                context.modelProviders = providers;
+              }),
+            ),
+          );
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
@@ -1242,6 +1319,62 @@ export function makeOpenCodeAdapter(
               },
             });
           }
+
+          const tokens = event.properties.info.tokens;
+          const input = tokens?.input ?? 0;
+          const output = tokens?.output ?? 0;
+          const reasoning = tokens?.reasoning ?? 0;
+          const cacheRead = tokens?.cache?.read ?? 0;
+          const cacheWrite = tokens?.cache?.write ?? 0;
+          const deltaInput = Math.max(0, input - context.latestTokensInput);
+          const deltaOutput = Math.max(0, output - context.latestTokensOutput);
+          const deltaReasoning = Math.max(0, reasoning - context.latestTokensReasoning);
+          const deltaCacheRead = Math.max(0, cacheRead - context.latestTokensCacheRead);
+          const deltaCacheWrite = Math.max(0, cacheWrite - context.latestTokensCacheWrite);
+          context.latestTokensInput = input;
+          context.latestTokensOutput = output;
+          context.latestTokensReasoning = reasoning;
+          context.latestTokensCacheRead = cacheRead;
+          context.latestTokensCacheWrite = cacheWrite;
+          const usedTokens =
+            deltaInput + deltaOutput + deltaReasoning + deltaCacheRead + deltaCacheWrite;
+          if (usedTokens === 0) {
+            break;
+          }
+
+          // OpenCode reports reasoning and generated text as disjoint counts;
+          // cache writes are part of the input total. `usedTokens` is the
+          // current-turn delta, while the session's cumulative total is the
+          // honest all-time figure (compaction never shrinks it).
+          const model = event.properties.info.model;
+          const maxTokens =
+            typeof model?.providerID === "string" && typeof model?.id === "string"
+              ? resolveOpenCodeModelContextLimit(
+                  yield* ensureModelProviders(context),
+                  model.providerID,
+                  model.id,
+                )
+              : null;
+          const usage: ThreadTokenUsageSnapshot = {
+            usedTokens,
+            totalProcessedTokens: input + output + reasoning + cacheRead + cacheWrite,
+            ...(deltaInput > 0 ? { inputTokens: deltaInput } : {}),
+            ...(deltaCacheRead > 0 ? { cachedInputTokens: deltaCacheRead } : {}),
+            ...(deltaOutput > 0 ? { outputTokens: deltaOutput } : {}),
+            ...(deltaReasoning > 0 ? { reasoningOutputTokens: deltaReasoning } : {}),
+            ...(maxTokens !== null ? { maxTokens } : {}),
+          };
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.session.threadId,
+              ...(context.activeTurnId ? { turnId: context.activeTurnId } : {}),
+              raw: event,
+            })),
+            type: "thread.token-usage.updated",
+            payload: {
+              usage,
+            },
+          });
           break;
         }
 
@@ -1804,6 +1937,12 @@ export function makeOpenCodeAdapter(
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
+          latestTokensInput: started.openCodeSession.tokens?.input ?? 0,
+          latestTokensOutput: started.openCodeSession.tokens?.output ?? 0,
+          latestTokensReasoning: started.openCodeSession.tokens?.reasoning ?? 0,
+          latestTokensCacheRead: started.openCodeSession.tokens?.cache?.read ?? 0,
+          latestTokensCacheWrite: started.openCodeSession.tokens?.cache?.write ?? 0,
+          modelProviders: undefined,
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
           subagentTasks: new Map(),
@@ -2153,4 +2292,3 @@ export function makeOpenCodeAdapter(
     } satisfies OpenCodeAdapterShape;
   });
 }
-
