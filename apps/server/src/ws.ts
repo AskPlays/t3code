@@ -40,6 +40,7 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  ProviderCommandCatalogError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type ServerSelfUpdateError,
@@ -79,6 +80,8 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
+import { ProviderUnsupportedError } from "./provider/Errors.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -124,6 +127,8 @@ import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isProviderCommandCatalogError = Schema.is(ProviderCommandCatalogError);
+const isProviderUnsupportedError = Schema.is(ProviderUnsupportedError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -369,6 +374,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerService = yield* ProviderService.ProviderService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -477,6 +483,21 @@ const makeWsRpcLayer = (
               message: cause instanceof Error ? cause.message : fallbackMessage,
               cause,
             });
+      const toProviderCommandCatalogError = (
+        cause: unknown,
+        fallback: ProviderCommandCatalogError["reason"],
+      ): ProviderCommandCatalogError => {
+        if (isProviderCommandCatalogError(cause)) {
+          return cause;
+        }
+        const reason: ProviderCommandCatalogError["reason"] = isProviderUnsupportedError(cause)
+          ? "unsupported"
+          : fallback;
+        return new ProviderCommandCatalogError({
+          reason,
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
+      };
       const randomUUID = crypto.randomUUIDv4.pipe(
         Effect.mapError((cause) =>
           toDispatchCommandError(cause, "Failed to generate orchestration command identifier."),
@@ -1445,6 +1466,18 @@ const makeWsRpcLayer = (
               ? providerRegistry.refreshInstance(input.instanceId)
               : providerRegistry.refresh()
             ).pipe(Effect.map((providers) => ({ providers }))),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverGetProviderCommandCatalog]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetProviderCommandCatalog,
+            providerService
+              .getCommandCatalog(input)
+              .pipe(
+                Effect.mapError((cause) =>
+                  toProviderCommandCatalogError(cause, "discovery_failed"),
+                ),
+              ),
             { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>

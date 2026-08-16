@@ -10,6 +10,7 @@
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
+  ProviderCommandCatalog,
   ProviderDriverKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
@@ -118,6 +119,17 @@ export interface ProviderAdapterShape<TError> {
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;
+
+  /**
+   * Resolve the provider's command/skill catalog for a project directory.
+   *
+   * Optional: only adapters whose provider has per-directory catalogs
+   * implement it (OpenCode today). Callers fall back to the provider
+   * snapshot's environment-scoped catalogs when the method is absent.
+   */
+  readonly getCommandCatalog?: (input: {
+    readonly directory: string;
+  }) => Effect.Effect<ProviderCommandCatalog, TError>;
 
   /**
    * Canonical runtime event stream emitted by this adapter.

@@ -88,7 +88,12 @@ type LegacyProviderRuntimeEvent = {
   readonly [key: string]: unknown;
 };
 
-function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
+function makeFakeCodexAdapter(
+  provider: ProviderDriverKind = CODEX_DRIVER,
+  options?: {
+    readonly getCommandCatalog?: ProviderAdapterShape<ProviderAdapterError>["getCommandCatalog"];
+  },
+) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -219,6 +224,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    ...(options?.getCommandCatalog !== undefined
+      ? { getCommandCatalog: options.getCommandCatalog }
+      : {}),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -369,6 +377,106 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
 
     assert.equal(Exit.isSuccess(closeExit), true);
     assert.equal(codex.stopAll.mock.calls.length, 1);
+  }),
+);
+
+it.effect("ProviderServiceLive routes per-directory catalog lookups to the instance adapter", () =>
+  Effect.gen(function* () {
+    const getCommandCatalog = vi.fn(({ directory }: { readonly directory: string }) =>
+      Effect.succeed({
+        slashCommands: [{ name: "init", description: `guided AGENTS.md setup in ${directory}` }],
+        skills: [],
+      }),
+    );
+    const catalogAdapter = makeFakeCodexAdapter(CODEX_DRIVER, { getCommandCatalog });
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: catalogAdapter.adapter,
+    });
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+
+    const instanceId = codexInstanceId;
+    const directory = "D:\\projects\\demo";
+
+    const catalog = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.getCommandCatalog({ instanceId, directory });
+    }).pipe(Effect.provide(providerLayer));
+
+    assert.equal(getCommandCatalog.mock.calls.length, 1);
+    assert.equal(getCommandCatalog.mock.calls[0]?.[0]?.directory, directory);
+    assert.equal(catalog.slashCommands[0]?.description, `guided AGENTS.md setup in ${directory}`);
+  }),
+);
+
+it.effect("ProviderServiceLive rejects per-directory catalog lookups without adapter support", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+    });
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+
+    const failure = yield* Effect.flip(
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        return yield* provider.getCommandCatalog({
+          instanceId: codexInstanceId,
+          directory: "D:\\projects\\demo",
+        });
+      }).pipe(Effect.provide(providerLayer)),
+    );
+
+    assert.instanceOf(failure, ProviderUnsupportedError);
   }),
 );
 

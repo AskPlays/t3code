@@ -209,6 +209,44 @@ export const loadOpenCodeInventoryFromClient = (
   );
 };
 
+export interface OpenCodeCommandCatalog {
+  readonly commands: ReadonlyArray<Command>;
+  readonly skills: AppSkillsResponse;
+}
+
+/**
+ * Load only the command/skill catalog from a connected OpenCode server.
+ * Lighter than {@link loadOpenCodeInventoryFromClient}: no provider model
+ * catalog or agent list is fetched, so per-thread catalog lookups (composer
+ * `/` and `$` menus) never pay for the full inventory.
+ */
+export const loadOpenCodeCommandCatalogFromClient = (
+  client: OpencodeClient,
+): Effect.Effect<OpenCodeCommandCatalog, OpenCodeRuntimeError> => {
+  const loadCommands = runOpenCodeSdk("command.list", () => client.command.list()).pipe(
+    Effect.map((result) => result.data ?? []),
+    Effect.tapError((cause) =>
+      Effect.logWarning("OpenCode command discovery failed; continuing without commands.", {
+        detail: cause.detail,
+      }),
+    ),
+    Effect.orElseSucceed(() => [] as ReadonlyArray<Command>),
+  );
+  const loadSkills = runOpenCodeSdk("app.skills", () => client.app.skills()).pipe(
+    Effect.map((result) => result.data ?? []),
+    Effect.tapError((cause) =>
+      Effect.logWarning("OpenCode skill discovery failed; continuing without skills.", {
+        detail: cause.detail,
+      }),
+    ),
+    Effect.orElseSucceed(() => [] as AppSkillsResponse),
+  );
+
+  return Effect.all([loadCommands, loadSkills], { concurrency: "unbounded" }).pipe(
+    Effect.map(([commands, skills]) => ({ commands, skills })),
+  );
+};
+
 function parseServerUrlFromOutput(output: string): string | null {
   for (const line of output.split("\n")) {
     if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {

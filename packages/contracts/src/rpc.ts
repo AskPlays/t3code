@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
@@ -153,6 +154,8 @@ import {
   ServerConfig,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
+  ServerProviderSlashCommand,
+  ServerProviderSkill,
   ServerLifecycleStreamEvent,
   ServerRemoveKeybindingInput,
   ServerRemoveKeybindingResult,
@@ -252,6 +255,7 @@ export const WS_METHODS = {
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
+  serverGetProviderCommandCatalog: "server.getProviderCommandCatalog",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
@@ -348,6 +352,48 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
   success: ServerProviderUpdatedPayload,
   error: EnvironmentAuthorizationError,
 });
+
+export const ProviderCommandCatalogInput = Schema.Struct({
+  /**
+   * The provider instance whose command/skill catalog is wanted. Routing by
+   * instance keeps the lookup on the configured server / binary that
+   * instance owns.
+   */
+  instanceId: ProviderInstanceId,
+  /**
+   * The project directory the catalog is resolved for. OpenCode scopes
+   * skills and commands to the working directory (project `.opencode/`
+   * files plus global/user scopes), so the thread's project root is the
+   * correct key — not the server's own cwd.
+   */
+  directory: Schema.String,
+});
+export type ProviderCommandCatalogInput = typeof ProviderCommandCatalogInput.Type;
+
+export const ProviderCommandCatalog = Schema.Struct({
+  slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type ProviderCommandCatalog = typeof ProviderCommandCatalog.Type;
+
+export class ProviderCommandCatalogError extends Schema.TaggedErrorClass<ProviderCommandCatalogError>()(
+  "ProviderCommandCatalogError",
+  {
+    reason: Schema.Literals(["unsupported", "instance_not_found", "discovery_failed"]),
+    message: Schema.String,
+  },
+) {}
+
+export const WsServerGetProviderCommandCatalogRpc = Rpc.make(
+  WS_METHODS.serverGetProviderCommandCatalog,
+  {
+    payload: ProviderCommandCatalogInput,
+    success: ProviderCommandCatalog,
+    error: Schema.Union([ProviderCommandCatalogError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
   payload: ServerProviderUpdateInput,
@@ -974,6 +1020,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
+  WsServerGetProviderCommandCatalogRpc,
   WsServerUpdateProviderRpc,
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,

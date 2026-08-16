@@ -47,7 +47,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderUnsupportedError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -1021,6 +1025,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getCapabilities: ProviderServiceMethod<"getCapabilities"> = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
 
+  const getCommandCatalog: ProviderServiceMethod<"getCommandCatalog"> = (input) =>
+    Effect.gen(function* () {
+      const adapter = yield* registry.getByInstance(input.instanceId);
+      if (adapter.getCommandCatalog === undefined) {
+        return yield* new ProviderUnsupportedError({ provider: adapter.provider });
+      }
+      return yield* adapter.getCommandCatalog({ directory: input.directory });
+    });
+
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
@@ -1134,6 +1147,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     stopSession,
     listSessions,
     getCapabilities,
+    getCommandCatalog,
     getInstanceInfo,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple

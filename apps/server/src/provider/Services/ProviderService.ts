@@ -12,6 +12,7 @@
  * @module ProviderService
  */
 import type {
+  ProviderCommandCatalog,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
@@ -92,6 +93,16 @@ export interface ProviderServiceShape {
   readonly getCapabilities: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapterCapabilities, ProviderServiceError>;
+
+  /**
+   * Resolve a provider instance's command/skill catalog for a project
+   * directory. Fails with `ProviderUnsupportedError` when the instance's
+   * driver does not implement per-directory catalogs.
+   */
+  readonly getCommandCatalog: (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly directory: string;
+  }) => Effect.Effect<ProviderCommandCatalog, ProviderServiceError>;
 
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,

@@ -714,6 +714,14 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetUsageSummary,
       staleTimeMs: 60_000,
     }),
+    // Per-directory provider command/skill catalogs for the composer `/` and
+    // `$` menus. Keyed by the thread's project directory so each project's
+    // catalogs are fetched once and shared across its threads.
+    providerCommandCatalog: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:provider-command-catalog",
+      tag: WS_METHODS.serverGetProviderCommandCatalog,
+      staleTimeMs: 60_000,
+    }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:welcome",

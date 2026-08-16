@@ -1,6 +1,7 @@
 import {
   EventId,
   type OpenCodeSettings,
+  type ProviderCommandCatalog,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -43,8 +44,10 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { mapOpenCodeInventoryToProviderCatalog } from "../opencodeCatalog.ts";
 import {
   buildOpenCodePermissionRules,
+  loadOpenCodeCommandCatalogFromClient,
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   openCodeQuestionId,
@@ -679,6 +682,7 @@ export function makeOpenCodeAdapter(
     const crypto = yield* Crypto.Crypto;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const resolvedEnvironment = options?.environment ?? process.env;
     const sameDirectory = (left: string, right: string) =>
       isSameOpenCodeDirectory(fileSystem, path, left, right);
     const nativeEventLogger =
@@ -2465,6 +2469,38 @@ export function makeOpenCodeAdapter(
         );
       });
 
+    const getCommandCatalog: NonNullable<OpenCodeAdapterShape["getCommandCatalog"]> = (input) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          // Per-directory catalog lookup, independent of any session: connect
+          // to the instance's server (spawned and scoped when no external URL
+          // is configured), then ask it for the commands/skills of
+          // `input.directory`. OpenCode merges the project's `.opencode/`
+          // files with the user-global scopes for that directory, so the
+          // thread's project root is the key.
+          const server = yield* openCodeRuntime.connectToOpenCodeServer({
+            binaryPath: openCodeSettings.binaryPath,
+            ...(openCodeSettings.serverUrl.trim().length > 0
+              ? { serverUrl: openCodeSettings.serverUrl }
+              : {}),
+            environment: resolvedEnvironment,
+          });
+          const client = openCodeRuntime.createOpenCodeSdkClient({
+            baseUrl: server.url,
+            directory: input.directory,
+            ...(openCodeSettings.serverPassword
+              ? { serverPassword: openCodeSettings.serverPassword }
+              : {}),
+          });
+          const inventory = yield* loadOpenCodeCommandCatalogFromClient(client);
+          const catalog = mapOpenCodeInventoryToProviderCatalog(inventory, input.directory);
+          return {
+            slashCommands: [...catalog.slashCommands],
+            skills: [...catalog.skills],
+          } satisfies ProviderCommandCatalog;
+        }),
+      ).pipe(Effect.mapError(toRequestError));
+
     return {
       provider: PROVIDER,
       capabilities: {
@@ -2481,6 +2517,7 @@ export function makeOpenCodeAdapter(
       readThread,
       rollbackThread,
       stopAll,
+      getCommandCatalog,
       get streamEvents() {
         return Stream.fromQueue(runtimeEvents);
       },

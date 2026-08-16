@@ -320,6 +320,7 @@ describe("ProviderCommandReactor", () => {
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
         }),
+      getCommandCatalog: unsupported,
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
         const driverKind = ProviderDriverKind.make(

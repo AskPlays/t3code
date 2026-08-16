@@ -86,6 +86,10 @@ const runtimeMock = {
     providersCalls: 0 as number,
     providersResponse: [] as unknown[],
     providersError: null as Error | null,
+    commandListCalls: 0 as number,
+    commandListResponse: [] as unknown[],
+    skillListCalls: 0 as number,
+    skillListResponse: [] as unknown[],
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -116,6 +120,10 @@ const runtimeMock = {
     this.state.providersCalls = 0;
     this.state.providersResponse = [];
     this.state.providersError = null;
+    this.state.commandListCalls = 0;
+    this.state.commandListResponse = [];
+    this.state.skillListCalls = 0;
+    this.state.skillListResponse = [];
   },
 };
 
@@ -258,6 +266,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             throw runtimeMock.state.providersError;
           }
           return { data: { providers: runtimeMock.state.providersResponse } };
+        },
+      },
+      command: {
+        list: async () => {
+          runtimeMock.state.commandListCalls += 1;
+          return { data: runtimeMock.state.commandListResponse };
+        },
+      },
+      app: {
+        skills: async () => {
+          runtimeMock.state.skillListCalls += 1;
+          return { data: runtimeMock.state.skillListResponse };
         },
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
@@ -2604,6 +2624,63 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         NodeAssert.equal("maxTokens" in usage.payload.usage, false);
       }
       NodeAssert.equal(runtimeMock.state.providersCalls, 1);
+    }),
+  );
+
+  it.effect("getCommandCatalog resolves the project's commands and skills per directory", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      runtimeMock.state.commandListResponse = [
+        {
+          name: "review",
+          description: "review changes [commit|branch|pr]",
+          source: "command",
+          template: "Review the changes",
+          hints: ["$ARGUMENTS"],
+        },
+        {
+          name: "customize-opencode",
+          description: "Edit opencode configuration",
+          source: "skill",
+          template: "…",
+          hints: [],
+        },
+      ];
+      runtimeMock.state.skillListResponse = [
+        {
+          name: "review",
+          description: "Adversarial review of work-in-progress changes",
+          location: "D:\\projects\\demo\\.opencode\\skills\\review\\SKILL.md",
+          content: "…",
+        },
+        {
+          name: "global-skill",
+          description: "Available in every project",
+          location: "C:\\Users\\test\\.config\\opencode\\skills\\global-skill\\SKILL.md",
+          content: "…",
+        },
+      ];
+
+      const getCommandCatalog = adapter.getCommandCatalog;
+      NodeAssert.ok(getCommandCatalog);
+      const catalog = yield* getCommandCatalog({ directory: "D:\\projects\\demo" });
+
+      NodeAssert.deepEqual(
+        catalog.slashCommands.map((command) => command.name),
+        ["customize-opencode", "review"],
+      );
+      NodeAssert.equal(catalog.slashCommands[1]?.input?.hint, "$ARGUMENTS");
+      NodeAssert.deepEqual(
+        catalog.skills.map((skill) => [skill.name, skill.scope]),
+        [
+          ["global-skill", "user"],
+          ["review", "project"],
+        ],
+      );
+      NodeAssert.equal(runtimeMock.state.commandListCalls, 1);
+      NodeAssert.equal(runtimeMock.state.skillListCalls, 1);
+      // The scoped server connection was torn down after the lookup.
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
     }),
   );
 });

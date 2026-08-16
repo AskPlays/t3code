@@ -113,6 +113,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -380,6 +381,9 @@ const makeBrowserOtlpPayload = (spanName: string) =>
     return JSON.parse(request.body) as OtlpTracer.TraceData;
   });
 
+const unsupportedProviderCall = <A>() =>
+  Effect.die(new Error("Unsupported provider call in test")) as Effect.Effect<A, never>;
+
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfig.ServerConfig["Service"]>;
   layers?: {
@@ -626,18 +630,34 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          refresh: () => Effect.succeed([]),
-          refreshInstance: () => Effect.succeed([]),
-          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
-          setProviderMaintenanceActionState: () => Effect.succeed([]),
-          streamChanges: Stream.empty,
-          ...options?.layers?.providerRegistry,
-        }),
+        Layer.provideMerge(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+            refresh: () => Effect.succeed([]),
+            refreshInstance: () => Effect.succeed([]),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed([]),
+            streamChanges: Stream.empty,
+            ...options?.layers?.providerRegistry,
+          }),
+          Layer.mock(ProviderService.ProviderService)({
+            startSession: () => unsupportedProviderCall(),
+            sendTurn: () => unsupportedProviderCall(),
+            interruptTurn: () => unsupportedProviderCall(),
+            respondToRequest: () => unsupportedProviderCall(),
+            respondToUserInput: () => unsupportedProviderCall(),
+            stopSession: () => unsupportedProviderCall(),
+            listSessions: () => Effect.succeed([]),
+            getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+            getCommandCatalog: () => unsupportedProviderCall(),
+            getInstanceInfo: () => unsupportedProviderCall(),
+            rollbackConversation: () => unsupportedProviderCall(),
+            streamEvents: Stream.empty,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ServerSettings.ServerSettingsService)({

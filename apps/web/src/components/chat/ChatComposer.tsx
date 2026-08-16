@@ -32,6 +32,10 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useAtomValue } from "@effect/atom-react";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { serverEnvironment } from "../../state/server";
 import {
   clampCollapsedComposerCursor,
   type ComposerTrigger,
@@ -113,6 +117,16 @@ type ComposerCommandMenuPosition = {
   maxHeight: number;
   width: number;
 };
+
+/**
+ * Idle atom standing in for the per-thread catalog query when the active
+ * provider/driver has no per-directory catalogs (or the thread has no
+ * project). Its value is never read in that case — the enabled gate below
+ * discards it — so the placeholder keeps the hook unconditional.
+ */
+const EMPTY_PROVIDER_COMMAND_CATALOG_ATOM: ReturnType<
+  typeof serverEnvironment.providerCommandCatalog
+> = Atom.make(AsyncResult.success({ slashCommands: [], skills: [] }));
 
 function composerCommandMenuPositionsEqual(
   a: ComposerCommandMenuPosition,
@@ -850,6 +864,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
 
+  // Per-thread command/skill catalog: the thread's project directory
+  // (gitCwd), not the environment-scoped snapshot, is the correct key for
+  // providers that expose per-directory catalogs (OpenCode). Falls back to
+  // the snapshot's catalogs while loading or when the provider/driver does
+  // not support per-directory lookups.
+  const threadProviderCommandCatalogEnabled =
+    selectedProvider === "opencode" && gitCwd !== null && selectedInstanceId !== undefined;
+  const threadProviderCommandCatalogAtom = useMemo(
+    () =>
+      threadProviderCommandCatalogEnabled
+        ? serverEnvironment.providerCommandCatalog({
+            environmentId,
+            input: { instanceId: selectedInstanceId, directory: gitCwd as string },
+          })
+        : EMPTY_PROVIDER_COMMAND_CATALOG_ATOM,
+    [
+      environmentId,
+      gitCwd,
+      selectedInstanceId,
+      selectedProvider,
+      threadProviderCommandCatalogEnabled,
+    ],
+  );
+  const threadProviderCommandCatalogResult = useAtomValue(threadProviderCommandCatalogAtom);
+  const threadCommandCatalog =
+    threadProviderCommandCatalogEnabled && threadProviderCommandCatalogResult._tag === "Success"
+      ? Option.getOrNull(AsyncResult.value(threadProviderCommandCatalogResult))
+      : undefined;
+  const threadSlashCommands = threadCommandCatalog?.slashCommands;
+  const threadSkills = threadCommandCatalog?.skills;
+
   const composerPromptInjectionState = useMemo(
     () => getComposerPromptInjectionState(prompt),
     [prompt],
@@ -1064,16 +1109,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             ] as const)
           : []),
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
-        (command) => ({
-          id: `provider-slash-command:${selectedProvider}:${command.name}`,
-          type: "provider-slash-command" as const,
-          provider: selectedProvider,
-          command,
-          label: `/${command.name}`,
-          description: command.description ?? command.input?.hint ?? "Run provider command",
-        }),
-      );
+      const providerSlashCommandItems = (
+        threadSlashCommands ??
+        selectedProviderStatus?.slashCommands ??
+        []
+      ).map((command) => ({
+        id: `provider-slash-command:${selectedProvider}:${command.name}`,
+        type: "provider-slash-command" as const,
+        provider: selectedProvider,
+        command,
+        label: `/${command.name}`,
+        description: command.description ?? command.input?.hint ?? "Run provider command",
+      }));
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
       if (!query) {
@@ -1082,19 +1129,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return searchSlashCommandItems(slashCommandItems, query);
     }
     if (composerTrigger.kind === "skill") {
-      return searchProviderSkills(selectedProviderStatus?.skills ?? [], composerTrigger.query).map(
-        (skill) => ({
-          id: `skill:${selectedProvider}:${skill.name}`,
-          type: "skill" as const,
-          provider: selectedProvider,
-          skill,
-          label: formatProviderSkillDisplayName(skill),
-          description:
-            skill.shortDescription ??
-            skill.description ??
-            (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
-        }),
-      );
+      return searchProviderSkills(
+        threadSkills ?? selectedProviderStatus?.skills ?? [],
+        composerTrigger.query,
+      ).map((skill) => ({
+        id: `skill:${selectedProvider}:${skill.name}`,
+        type: "skill" as const,
+        provider: selectedProvider,
+        skill,
+        label: formatProviderSkillDisplayName(skill),
+        description:
+          skill.shortDescription ??
+          skill.description ??
+          (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
+      }));
     }
     return [];
   }, [
@@ -1102,6 +1150,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     planModeUiEnabled,
     selectedProvider,
     selectedProviderStatus,
+    threadSlashCommands,
+    threadSkills,
     workspaceEntries.entries,
   ]);
 
