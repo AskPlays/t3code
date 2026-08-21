@@ -15,7 +15,9 @@ Set-Location $repoRoot
 
 $bundle = Join-Path $repoRoot "apps\desktop\dist-electron\main.cjs"
 $markerPath = Join-Path $repoRoot "apps\desktop\dist-electron\.build-commit"
-$commit = (git -C $repoRoot rev-parse HEAD).Trim()
+# Fingerprint only commits that can change the bundle, so docs or script
+# commits don't trigger pointless rebuilds.
+$commit = (git -C $repoRoot log -1 --format=%H -- apps packages infra pnpm-lock.yaml vite.config.ts).Trim()
 $builtCommit = if (Test-Path $markerPath) { (Get-Content $markerPath -Raw).Trim() } else { $null }
 
 # Uncommitted edits are invisible to HEAD; use -Rebuild after editing source
