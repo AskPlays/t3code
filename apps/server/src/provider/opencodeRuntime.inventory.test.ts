@@ -1,41 +1,72 @@
 import * as NodeAssert from "node:assert/strict";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { it } from "@effect/vitest";
-import type { OpencodeClient, ProviderListResponse } from "@opencode-ai/sdk/v2";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
-import { loadOpenCodeInventoryFromClient } from "./opencodeRuntime.ts";
+import { OpenCodeRuntime, OpenCodeRuntimeLive } from "./opencodeRuntime.ts";
 
-const providerList: ProviderListResponse = {
-  all: [],
-  connected: [],
-  default: {},
-};
+const testLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
 
-it.effect("keeps core inventory when optional command and skill discovery fail", () =>
-  Effect.gen(function* () {
-    const client = {
-      provider: {
-        list: async () => ({ data: providerList }),
-      },
-      app: {
-        agents: async () => ({ data: [] }),
-        skills: async () => {
-          throw new Error("skills unavailable");
+it.layer(testLayer)("loadOpenCodeInventory", (it) => {
+  it.effect("keeps core inventory when optional skill discovery fails", () =>
+    Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const client = {
+        provider: {
+          list: () =>
+            Promise.resolve({
+              data: {
+                connected: ["openai"],
+                all: [],
+                default: {},
+              },
+            }),
         },
-      },
-      command: {
-        list: async () => {
-          throw new Error("commands unavailable");
+        app: {
+          agents: () => Promise.resolve({ data: [] }),
+          skills: () => Promise.reject(new Error("skills endpoint unavailable")),
         },
-      },
-    } as unknown as OpencodeClient;
+      } as unknown as OpencodeClient;
 
-    const inventory = yield* loadOpenCodeInventoryFromClient(client);
+      const inventory = yield* runtime.loadOpenCodeInventory(client);
 
-    NodeAssert.deepEqual(inventory.providerList, providerList);
-    NodeAssert.deepEqual(inventory.agents, []);
-    NodeAssert.deepEqual(inventory.commands, []);
-    NodeAssert.deepEqual(inventory.skills, []);
-  }),
-);
+      NodeAssert.deepEqual(inventory.providerList.connected, ["openai"]);
+      NodeAssert.deepEqual(inventory.agents, []);
+      NodeAssert.deepEqual(inventory.skills, []);
+    }),
+  );
+
+  it.effect("keeps core inventory when optional command discovery fails", () =>
+    Effect.gen(function* () {
+      const runtime = yield* OpenCodeRuntime;
+      const client = {
+        provider: {
+          list: () =>
+            Promise.resolve({
+              data: {
+                connected: ["openai"],
+                all: [],
+                default: {},
+              },
+            }),
+        },
+        app: {
+          agents: () => Promise.resolve({ data: [] }),
+          skills: () => Promise.resolve({ data: [] }),
+        },
+        command: {
+          list: () => Promise.reject(new Error("commands endpoint unavailable")),
+        },
+      } as unknown as OpencodeClient;
+
+      const inventory = yield* runtime.loadOpenCodeInventory(client);
+
+      NodeAssert.deepEqual(inventory.providerList.connected, ["openai"]);
+      NodeAssert.deepEqual(inventory.agents, []);
+      NodeAssert.deepEqual(inventory.commands, []);
+    }),
+  );
+});

@@ -2,6 +2,7 @@ import {
   type ModelCapabilities,
   type OpenCodeSettings,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -22,7 +23,7 @@ import {
   openCodeRuntimeErrorDetail,
   type OpenCodeInventory,
 } from "../opencodeRuntime.ts";
-import { openCodeSlashCommands, openCodeSkills } from "../opencodeCatalog.ts";
+import { openCodeSlashCommands } from "../opencodeCatalog.ts";
 import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
 
 const OPENCODE_PRESENTATION = {
@@ -251,6 +252,45 @@ function flattenOpenCodeModels(input: OpenCodeInventory): ReadonlyArray<ServerPr
   return models.toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
+function trimOptional(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function flattenOpenCodeSkills(
+  input: OpenCodeInventory,
+  cwd: string,
+): ReadonlyArray<ServerProviderSkill> {
+  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/+$/, "");
+  const skills: ServerProviderSkill[] = [];
+  for (const skill of input.skills ?? []) {
+    const name = trimOptional(skill.name);
+    const path = trimOptional(skill.location);
+    if (!name || !path) {
+      continue;
+    }
+
+    const description = trimOptional(skill.description);
+    const normalizedPath = path.replaceAll("\\", "/");
+    const scope =
+      path === "<built-in>"
+        ? "system"
+        : normalizedCwd &&
+            (normalizedPath === normalizedCwd || normalizedPath.startsWith(`${normalizedCwd}/`))
+          ? "project"
+          : "user";
+    skills.push({
+      name,
+      path,
+      enabled: true,
+      ...(description ? { description, shortDescription: description } : {}),
+      ...(scope ? { scope } : {}),
+    });
+  }
+
+  return skills.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
 export const makePendingOpenCodeProvider = (
   openCodeSettings: OpenCodeSettings,
 ): Effect.Effect<ServerProviderDraft> =>
@@ -392,23 +432,30 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   }
 
   const inventoryExit = yield* Effect.exit(
-    Effect.scoped(
-      Effect.gen(function* () {
-        const server = yield* openCodeRuntime.connectToOpenCodeServer({
-          binaryPath: openCodeSettings.binaryPath,
-          ...(isExternalServer ? { serverUrl: openCodeSettings.serverUrl } : {}),
-          environment: resolvedEnvironment,
-        });
-        return yield* openCodeRuntime.loadOpenCodeInventory(
-          openCodeRuntime.createOpenCodeSdkClient({
-            baseUrl: server.url,
-            directory: cwd,
-            ...(openCodeSettings.serverPassword
-              ? { serverPassword: openCodeSettings.serverPassword }
-              : {}),
+    (isExternalServer
+      ? Effect.scoped(
+          Effect.gen(function* () {
+            const server = yield* openCodeRuntime.connectToOpenCodeServer({
+              binaryPath: openCodeSettings.binaryPath,
+              serverUrl: openCodeSettings.serverUrl,
+              environment: resolvedEnvironment,
+            });
+            return yield* openCodeRuntime.loadOpenCodeInventory(
+              openCodeRuntime.createOpenCodeSdkClient({
+                baseUrl: server.url,
+                directory: cwd,
+                ...(openCodeSettings.serverPassword
+                  ? { serverPassword: openCodeSettings.serverPassword }
+                  : {}),
+              }),
+            );
           }),
-        );
-      }),
+        )
+      : openCodeRuntime.loadInventoryFromCli({
+          binaryPath: openCodeSettings.binaryPath,
+          cwd,
+          environment: resolvedEnvironment,
+        })
     ).pipe(
       Effect.mapError(
         (cause) => new OpenCodeProbeError({ cause, detail: openCodeRuntimeErrorDetail(cause) }),
@@ -425,7 +472,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
   const slashCommands = openCodeSlashCommands(inventoryExit.value);
-  const skills = openCodeSkills(inventoryExit.value, cwd);
+  const skills = flattenOpenCodeSkills(inventoryExit.value, cwd);
   const connectedCount = inventoryExit.value.providerList.connected.length;
   return buildServerProvider({
     presentation: OPENCODE_PRESENTATION,

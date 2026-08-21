@@ -24,12 +24,12 @@ export function openCodeSlashCommands(
 ): ReadonlyArray<ServerProviderSlashCommand> {
   const commandsByName = new Map<string, ServerProviderSlashCommand>();
 
-  for (const command of inventory.commands) {
-    const name = nonEmptyTrimmed(command.name);
+  for (const command of inventory.commands ?? []) {
+    const name = nonEmptyTrimmed(command.name ?? undefined);
     if (!name) {
       continue;
     }
-    const description = nonEmptyTrimmed(command.description);
+    const description = nonEmptyTrimmed(command.description ?? undefined);
     const hint = command.hints
       .map((value) => value.trim())
       .filter((value) => value.length > 0)
@@ -58,8 +58,8 @@ export function openCodeSkills(
   const skillsByName = new Map<string, ServerProviderSkill>();
 
   for (const skill of inventory.skills) {
-    const name = nonEmptyTrimmed(skill.name);
-    const location = nonEmptyTrimmed(skill.location);
+    const name = nonEmptyTrimmed(skill.name ?? undefined);
+    const location = nonEmptyTrimmed(skill.location ?? undefined);
     if (!name || !location) {
       continue;
     }
@@ -72,7 +72,7 @@ export function openCodeSkills(
               normalizedLocation.startsWith(`${normalizedCwd}/`))
           ? "project"
           : "user";
-    const description = nonEmptyTrimmed(skill.description);
+    const description = nonEmptyTrimmed(skill.description ?? undefined);
     skillsByName.set(name, {
       name,
       path: location,
