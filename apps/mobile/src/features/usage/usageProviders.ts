@@ -10,6 +10,10 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = ["codex", "claude"];
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   claude: "Claude Code",
   codex: "Codex",
+  // Fork-only usage kind. Excluded from PROVIDER_ORDER, so no mobile surface
+  // renders it; entries exist because Record<UsageProviderKind, ...> is
+  // exhaustive over the fork's contract.
+  opencode: "OpenCode",
 };
 
 /**
@@ -21,5 +25,6 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
   return {
     claude: "#d97757",
     codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",
+    opencode: scheme === "dark" ? "#8f8b8b" : "#71717a",
   };
 }
