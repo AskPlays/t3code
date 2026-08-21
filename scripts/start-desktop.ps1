@@ -21,13 +21,11 @@ $builtCommit = if (Test-Path $markerPath) { (Get-Content $markerPath -Raw).Trim(
 # Uncommitted edits are invisible to HEAD; use -Rebuild after editing source
 # without committing.
 if ($Rebuild -or -not (Test-Path $bundle) -or $builtCommit -ne $commit) {
-    if (-not (Test-Path (Join-Path $repoRoot "node_modules"))) {
-        pnpm install
-        if ($LASTEXITCODE -ne 0) { throw "pnpm install failed" }
-    }
     Write-Host "Building desktop bundle for $($commit.Substring(0, 7))..." -ForegroundColor Cyan
     pnpm build:desktop
-    if ($LASTEXITCODE -ne 0) { throw "pnpm build:desktop failed" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "pnpm build:desktop failed (if dependencies are missing, run 'pnpm install' once)"
+    }
     Set-Content -Path $markerPath -Value $commit
 }
 
