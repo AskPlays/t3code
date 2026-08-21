@@ -22,7 +22,9 @@ export default defineConfig({
   },
   staged: {
     // Formatter only for now — no lint or typecheck on commit.
-    "*": "vp fmt",
+    // --no-error-on-unmatched-pattern lets commits of files without a
+    // formatter (e.g. scripts/*.ps1) pass when no staged file matches.
+    "*": "vp fmt --no-error-on-unmatched-pattern",
   },
   fmt: {
     ignorePatterns: [
