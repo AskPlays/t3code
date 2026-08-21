@@ -3,7 +3,7 @@ name: tdd
 description: Test-driven development with a red-green loop for the Vitest suite. Use when building features or fixing bugs test-first, or when the user asks for tests or wants behavior verified through public interfaces.
 ---
 
-TDD is the red → green loop. A good test verifies behavior through a public interface, not implementation details — it reads like a specification and survives refactors because it doesn't care about internal structure. run with `npm test` (Vitest) or `npm run test:watch`.
+TDD is the red → green loop. A good test verifies behavior through a public interface, not implementation details — it reads like a specification and survives refactors because it doesn't care about internal structure. Run targeted tests with `pnpm exec vp test run <paths>` from the owning package (e.g. `apps/server`), and watch mode with `vp test watch`.
 
 ## Seams — where tests go
 
@@ -25,4 +25,4 @@ When the shape of the interface is itself in question — how deep the module is
 
 ## Completion criterion
 
-Every pre-agreed seam has a passing test that fails when the behavior it specifies is broken, and the full suite (`npm test`) is green.
+Every pre-agreed seam has a passing test that fails when the behavior it specifies is broken, and the full suite (`pnpm test`) is green.
