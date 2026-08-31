@@ -210,10 +210,13 @@ describe("resolveOpenCodeDatabasePath", () => {
   });
 
   it("uses an absolute OPENCODE_DB override verbatim", () => {
-    process.env.OPENCODE_DB = "D:\\other\\usage.db";
-    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(
-      "D:\\other\\usage.db",
-    );
+    // Platform-appropriate absolute path: resolveOpenCodeDatabasePath only
+    // passes through overrides that are absolute on the host platform.
+    const absoluteDbPath = NodePath.isAbsolute("D:\\other\\usage.db")
+      ? "D:\\other\\usage.db"
+      : NodePath.resolve("/other/usage.db");
+    process.env.OPENCODE_DB = absoluteDbPath;
+    expect(resolveOpenCodeDatabasePath(NodePath.join("data", "opencode"))).toBe(absoluteDbPath);
   });
 
   it("resolves a relative OPENCODE_DB override against the data directory", () => {
