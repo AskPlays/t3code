@@ -16,6 +16,48 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-08-31 (9b2d04317)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills` (merge
+`b99e491e7`). Same resolution rule as before: in shared files adopt upstream's
+shapes so future merges stay small; keep fork-only logic in fork-only files.
+
+- **Adapter rewritten on upstream's chassis.** Upstream rewrote the OpenCode
+  interruption flow (cancellation Deferreds, prompt admission, `turn.aborted`
+  replacing `turn.completed {state: "interrupted"}`), so the adapter was
+  rebuilt from upstream's file with the fork's features grafted back:
+  subagent task.\* monitoring (ensure/hydrate/emit/settle + the dispatch seam
+  in `handleSubscribedEvent`, which now returns whether it consumed an event
+  and lets upstream's child-request routing handle unmatched types), the
+  owned-session token-usage snapshot + `resolveOpenCodeModelContextLimit`,
+  subagent aborts in `stopOpenCodeContext`/`interruptTurn`, and
+  `getCommandCatalog`. The fork's detached slash-command dispatch
+  (`session.command` endpoint) lives inside upstream's `sendTurn`: commands
+  skip prompt admission, fork detached into the session scope, and their
+  failures surface through `failDetachedCommand`; a rejection racing an
+  in-flight interrupt is parked on `OpenCodeCancellation.pendingCommandFailure`
+  and emitted by the abort-failure path.
+- **Fork tests updated to merged semantics** (one implementation each):
+  "keeps a late command rejection..." now asserts `turn.aborted` + no second
+  terminal event; the two plan-agent tests now assert upstream's precedence
+  (explicit agent option wins over interaction mode; plan mode applies when
+  no agent option). Upstream's child-approval/question routing tests take one
+  extra stream event (the fork's `task.started` for the parented child).
+  Upstream's old-interruption tests already cover the new machinery.
+- **Contract**: `UsageProviderKind` is upstream's v5 (`USAGE_MERGE_COMPATIBLE_SINCE`)
+  with the fork's `"opencode"` added; usage sources scan claude/codex/grok
+  (upstream) + opencode sqlite (fork). Web/mobile usage provider tables carry
+  both the upstream `grok` entry and the fork `opencode` stub.
+- **Environment notes**: `apps/server/package.json` keeps the fork's nightly
+  version string. `usageOpenCode.test.ts` now picks a platform-appropriate
+  absolute path (the hardcoded `D:\...` failed on Linux). The server.test
+  workspace-stat test fails when run as root (chmod 0o000 does not block
+  stat for root) — pre-existing upstream behavior, not merge damage.
+- **Verified**: server `tsgo` clean; OpenCodeAdapter 102/102,
+  OpenCodeProvider + opencodeRuntime.inventory + usage 62/62 + reconcile
+  suites green. Web/mobile untouched behaviorally (fork runs standard
+  clients there); typecheck not run for them.
+
 ## Upstream sync 2026-08-21 (be7d35aae)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills` (merge
