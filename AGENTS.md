@@ -154,3 +154,10 @@ Full glossary with file links: `docs/internals/glossary.md`
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Local deployment (this machine)
+
+The live server runs from this repo's build. Read
+`docs/operations/local-deployment.md` **before** restarting services, touching
+`~/.t3`, or running self-update flows — the agent session runs inside the
+server's process tree and can strand itself.
