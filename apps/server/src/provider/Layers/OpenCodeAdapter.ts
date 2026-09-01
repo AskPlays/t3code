@@ -1454,6 +1454,23 @@ export function makeOpenCodeAdapter(
           reason: "Interrupted by user.",
         },
       });
+      // The abort marker alone cannot settle the orchestration projection:
+      // ingestion only folds lifecycle events (session.*, turn.started,
+      // turn.completed) into the thread session, so the interrupted turn must
+      // also carry the terminal completion the other providers emit
+      // (Claude's user-abort result, Codex's turn/completed interrupted).
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId,
+          raw,
+        })),
+        type: "turn.completed",
+        payload: {
+          state: "interrupted",
+          stopReason: "Interrupted by user.",
+        },
+      });
       if (cancellation) {
         yield* Deferred.succeed(cancellation.completion, undefined).pipe(Effect.ignore);
       }
@@ -3411,6 +3428,17 @@ export function makeOpenCodeAdapter(
                         type: "turn.aborted",
                         payload: { reason: requestError.detail },
                       });
+                      // Settle the projection: the turn never started on
+                      // OpenCode's side, so its lifecycle terminal event must
+                      // still reach ingestion or the session stays "running".
+                      yield* emit({
+                        ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+                        type: "turn.completed",
+                        payload: {
+                          state: "failed",
+                          errorMessage: requestError.detail,
+                        },
+                      });
                       return;
                     }
                     const cleanupExit = yield* Effect.exit(
@@ -3460,6 +3488,19 @@ export function makeOpenCodeAdapter(
                       type: "turn.aborted",
                       payload: {
                         reason: requestError.detail,
+                      },
+                    });
+                    // Same settle contract as the non-timeout submission
+                    // failure above.
+                    yield* emit({
+                      ...(yield* buildEventBase({
+                        threadId: input.threadId,
+                        turnId,
+                      })),
+                      type: "turn.completed",
+                      payload: {
+                        state: "failed",
+                        errorMessage: requestError.detail,
                       },
                     });
                   }),

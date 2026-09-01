@@ -1190,12 +1190,16 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         yield* Effect.yieldNow;
       }
 
-      NodeAssert.equal(terminalEvents.length, 1);
-      const aborted = terminalEvents[0];
+      NodeAssert.equal(terminalEvents.length, 2);
+      const [aborted, interruptedCompletion] = terminalEvents;
       if (aborted?.type !== "turn.aborted") {
         throw new Error("Expected an interrupted turn.aborted event");
       }
       NodeAssert.equal(aborted.payload.reason, "Interrupted by user.");
+      if (interruptedCompletion?.type !== "turn.completed") {
+        throw new Error("Expected the interrupted turn.completed settlement");
+      }
+      NodeAssert.equal(interruptedCompletion.payload.state, "interrupted");
 
       const sessions = yield* adapter.listSessions();
       NodeAssert.equal(sessions[0]?.status, "ready");
@@ -1720,11 +1724,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -1747,6 +1746,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           "opencode/kimi-k3",
         ),
       });
+      // The interrupt above emits its own interrupted turn.completed; the
+      // head here must be the steer turn's completion, so filter by turn.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId === activeTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       busyBeforeSteer.resolve({
         id: "evt-busy-before-steer",
         type: "session.status",
@@ -2170,16 +2181,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         idleEvent.promise,
       ];
 
-      const eventsFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter(
-          (event) =>
-            event.threadId === threadId &&
-            (event.type === "content.delta" || event.type === "turn.completed"),
-        ),
-        Stream.take(2),
-        Stream.runCollect,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -2205,6 +2206,19 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
       yield* Effect.yieldNow;
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt's own settlement completes the stopped turn; the window
+      // below watches only the next turn's output.
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "content.delta" ||
+              (event.type === "turn.completed" && event.turnId !== stoppedTurn.turnId)),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
       runtimeMock.state.sessionStatusCalls = 0;
       runtimeMock.state.sessionStatusImplementation = async () => {
@@ -2310,11 +2324,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -2330,6 +2339,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
       yield* Effect.promise(() => staleStatusStarted.promise);
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt emits its own interrupted turn.completed; the completion
+      // window below must only see the next turn's terminal event.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== stoppedTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
 
       const activeTurnFiber = yield* adapter
         .sendTurn({
@@ -2534,11 +2555,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       runtimeMock.state.subscribedEvents = [idleEvent.promise, userMessageEvent.promise];
       runtimeMock.state.sessionStatusImplementation = async () => ({ data: {} });
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -2553,6 +2569,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt settles the stopped turn; only the next turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== stoppedTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       const activeTurn = yield* adapter.sendTurn({
         threadId,
         input: "Run after the stop",
@@ -2621,11 +2649,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -2640,6 +2663,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt settles the stopped turn; only the next turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== stoppedTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
 
       const activeTurnFiber = yield* adapter
         .sendTurn({
@@ -2717,11 +2752,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -2736,6 +2766,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt settles the stopped turn; only the next turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== stoppedTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       const activeTurn = yield* adapter.sendTurn({
         threadId,
         input: "Start the next turn",
@@ -3354,7 +3396,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(4),
+        Stream.take(5),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -3393,7 +3435,14 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         events
           .filter((event) => event.type === "turn.completed" || event.type === "turn.aborted")
           .map((event) => event.type),
-        ["turn.aborted"],
+        ["turn.aborted", "turn.completed"],
+      );
+      const interruptedCompletion = events.find((event) => event.type === "turn.completed");
+      NodeAssert.equal(
+        interruptedCompletion?.type === "turn.completed"
+          ? interruptedCompletion.payload.state
+          : undefined,
+        "interrupted",
       );
       const sessions = yield* adapter.listSessions();
       const session = sessions.find((candidate) => candidate.threadId === threadId);
@@ -3462,7 +3511,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         events
           .filter((event) => event.type === "turn.completed" || event.type === "turn.aborted")
           .map((event) => event.type),
-        ["turn.aborted"],
+        ["turn.aborted", "turn.completed"],
       );
     }),
   );
@@ -3625,7 +3674,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(4),
+        Stream.take(5),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -3669,7 +3718,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
               event.type === "runtime.error",
           )
           .map((event) => event.type),
-        ["turn.aborted"],
+        ["turn.aborted", "turn.completed"],
       );
 
       yield* adapter.stopSession(threadId);
@@ -3814,7 +3863,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(4),
+        Stream.take(5),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -3851,7 +3900,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         events
           .filter((event) => event.type === "turn.completed" || event.type === "turn.aborted")
           .map((event) => event.type),
-        ["turn.aborted"],
+        ["turn.aborted", "turn.completed"],
       );
 
       yield* adapter.stopSession(threadId);
@@ -4175,11 +4224,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         return { data: {} };
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -4194,6 +4238,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, firstTurn.turnId);
+      // The interrupt settles the first turn; only the second turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== firstTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       const secondTurn = yield* adapter.sendTurn({
         threadId,
         input: "Second turn",
@@ -4255,11 +4311,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         return { data: {} };
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -4274,6 +4325,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, firstTurn.turnId);
+      // The interrupt settles the first turn; only the second turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== firstTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       const secondTurn = yield* adapter.sendTurn({
         threadId,
         input: "Second turn",
@@ -4329,11 +4392,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         return { data: {} };
       };
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
-        Effect.forkChild,
-      );
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("opencode"),
         threadId,
@@ -4348,6 +4406,18 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         ),
       });
       yield* adapter.interruptTurn(threadId, stoppedTurn.turnId);
+      // The interrupt settles the stopped turn; only the next turn's
+      // completion matters below.
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "turn.completed" &&
+            event.turnId !== stoppedTurn.turnId,
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
       const activeTurn = yield* adapter.sendTurn({
         threadId,
         input: "Second turn",
@@ -4483,7 +4553,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       const eventsFiber = yield* adapter.streamEvents.pipe(
         Stream.filter((event) => event.threadId === threadId),
-        Stream.take(6),
+        // session.started + thread.started + first turn.started + the
+        // interrupt's aborted/completed pair + second turn.started + second
+        // turn.completed.
+        Stream.take(7),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -4604,6 +4677,9 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           .map((event) => ({ type: event.type, turnId: event.turnId })),
         [
           { type: "turn.aborted", turnId: firstTurn.turnId },
+          // The interrupt's settlement of the stopped turn; the next turn's
+          // completion follows from the real idle event.
+          { type: "turn.completed", turnId: firstTurn.turnId },
           { type: "turn.completed", turnId: secondTurn.turnId },
         ],
       );

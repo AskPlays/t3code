@@ -741,6 +741,117 @@ describe("ProviderRuntimeIngestion", () => {
     );
   });
 
+  it("settles a running turn's session when the provider reports the turn interrupted", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-interrupted-settle"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-interrupted-settle"),
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === asTurnId("turn-interrupted-settle"),
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-interrupted-settle"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-interrupted-settle"),
+      status: "interrupted",
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "ready" &&
+        entry.session?.activeTurnId === null &&
+        entry.latestTurn?.state !== "running" &&
+        entry.latestTurn?.completedAt !== null,
+    );
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.session?.lastError).toBeNull();
+    expect(thread.latestTurn?.completedAt).not.toBeNull();
+  });
+
+  it("settles a user-aborted OpenCode turn from its paired aborted + interrupted completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-user-abort"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-user-abort"),
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === asTurnId("turn-user-abort"),
+    );
+
+    // The user pressed stop: the orchestration interrupt request lands first
+    // and marks the turn interrupted in the projection.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-turn-interrupt-user-abort"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-user-abort"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    // What the OpenCode adapter emits on a successful interrupt: the
+    // informational abort marker, then the lifecycle terminal completion that
+    // settles the projection.
+    harness.emit({
+      type: "turn.aborted",
+      eventId: asEventId("evt-turn-aborted-user-abort"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-user-abort"),
+      payload: { reason: "Interrupted by user." },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-user-abort"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-user-abort"),
+      status: "interrupted",
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "ready" &&
+        entry.session?.activeTurnId === null &&
+        entry.latestTurn?.state === "interrupted" &&
+        entry.latestTurn?.completedAt !== null,
+    );
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.latestTurn?.state).toBe("interrupted");
+  });
+
   it("accepts claude turn lifecycle when seeded thread id is a synthetic placeholder", async () => {
     const harness = await createHarness();
     const seededAt = "2026-01-01T00:00:00.000Z";
