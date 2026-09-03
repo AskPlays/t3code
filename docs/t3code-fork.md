@@ -16,6 +16,55 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-03 (2120fbc18)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills`. Same resolution
+rule as before: in shared files adopt upstream's shapes so future merges stay
+small; keep fork-only logic in fork-only files. ~213 upstream commits behind
+(last sync was 9b2d04317 on 2026-08-31).
+
+- **Upstream now does per-cwd OpenCode skills — adopted for skills, fork keeps
+  commands.** New `OpenCodeDriver.snapshotForCwd` probes `loadOpenCodeSkills`
+  per cwd and maps through `openCodeSkillsToServerProviderSkills`; the composer
+  resolves per-cwd via `resolveProviderSkillsForCwd` /
+  `resolveProviderSlashCommandsForCwd` (`workspaceSnapshots`). Upstream still
+  has no OpenCode slash commands, so the fork keeps: `commands` on
+  `OpenCodeInventory`, `loadCommands` + `loadOpenCodeCommandCatalogFromClient`
+  in `opencodeRuntime.ts`, `openCodeSlashCommands` + scope-aware
+  `flattenOpenCodeSkills` in `OpenCodeProvider.ts` (kept alongside upstream's
+  exported `openCodeSkillsToServerProviderSkills`, which `OpenCodeDriver`
+  imports — both functions now live in that file), the `getCommandCatalog`
+  RPC, and the composer's per-thread catalog query. Composer precedence is
+  now `threadSlashCommands ?? selectedProviderSlashCommands` and
+  `threadSkills ?? selectedProviderSkills`.
+- **Adapter**: upstream renamed the abort exit (`abortExit` → `failedExit`);
+  the fork's detached-command-failure block (`pendingCommandFailure` →
+  `failDetachedCommand`) is kept, adapted to the new name.
+- **ProviderServiceShape now has both** `getCommandCatalog` (fork) and
+  `assertConversationRollbackSupported` (upstream); all test harnesses carry
+  both. `makeFakeCodexAdapter` in `ProviderService.test.ts` accepts both call
+  styles (fork's `{ getCommandCatalog }` options object, upstream's boolean)
+  via a normalized union param.
+- **UsageService**: upstream refactored the scan (`collectDirs` pre-walk +
+  `ScannedDir`, concurrent rates fetch, resume-from-position transcript
+  reads). The fork's `opencodeSqlite` source is adapted onto it: `ScannedDir`
+  carries `kind`/`databasePath`, `collectDirs` gates existence on the sqlite
+  path and skips the jsonl walk for it, the scan loop reads it via
+  `readOpenCodeUsage` as before.
+- **ChatComposer**: upstream's resting-composer transition (~400 lines) and
+  the fork's `EMPTY_PROVIDER_COMMAND_CATALOG_ATOM` are adjacent additions —
+  both kept.
+- **Environment notes**: `apps/server/package.json` keeps the fork's nightly
+  version string. After merging, `vp i` is required before typecheck
+  (`vite-plus` 0.2.2→0.3.0, `yauzl` + `@types/yauzl` are new upstream deps;
+  without install, `AntigravityInstallation.ts` fails on the missing module).
+  `vp` lives in `node_modules/.bin` (`export PATH="$PWD/node_modules/.bin:$PATH"`).
+- **Verified**: server typecheck clean (suggestions only); OpenCodeAdapter +
+  OpenCodeProvider + opencodeRuntime.inventory + usageOpenCode 136/136;
+  ProviderService + ProviderRuntimeIngestion + reconcile + UsageService
+  114/114; CheckpointReactor + ProviderCommandReactor + ProviderSessionReaper
+  82/82.
+
 ## Upstream sync 2026-08-31 (9b2d04317)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills` (merge
