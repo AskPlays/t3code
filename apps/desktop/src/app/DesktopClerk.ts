@@ -135,6 +135,21 @@ export const make = Effect.gen(function* () {
         return yield* Effect.interrupt;
       }
 
+      // The bridge registers the callback scheme via bare
+      // setAsDefaultProtocolClient(scheme). For unpackaged Windows runs that
+      // records `"electron.exe" "%1"`, so a browser callback boots bare
+      // Electron with the URL as the app path ("Unable to find Electron
+      // app"). Re-register with the real entry point; the bridge already
+      // ran, so this wins. Packaged builds and the mac dev launcher own
+      // their registration.
+      if (!environment.isPackaged && environment.platform === "win32") {
+        yield* electronApp.setAsDefaultProtocolClient(
+          ElectronProtocol.getDesktopScheme(environment.isDevelopment),
+          process.execPath,
+          [environment.path.join(environment.dirname, "main.cjs")],
+        );
+      }
+
       yield* electronApp.on("second-instance", () => {
         void runPromise(
           Effect.gen(function* () {

@@ -29,10 +29,17 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
-const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
+const makeDesktopClerkLayer = (
+  isDevelopment = true,
+  events: string[] = [],
+  overrides: { platform?: NodeJS.Platform; isPackaged?: boolean } = {},
+) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
+    platform: overrides.platform ?? "win32",
+    isPackaged: overrides.isPackaged ?? false,
+    dirname: "/tmp/dist-electron",
     appDataDirectory: "/tmp/app-data",
     userDataDirName: isDevelopment ? "t3code-dev" : "t3code",
     legacyUserDataDirName: isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
@@ -44,6 +51,7 @@ const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
       }),
+    setAsDefaultProtocolClient: () => Effect.succeed(true),
   } as unknown as ElectronApp.ElectronApp["Service"];
 
   return DesktopClerk.layer.pipe(
@@ -164,6 +172,7 @@ describe("DesktopClerk", () => {
         Effect.sync(() => {
           registeredEvents.push(eventName);
         }),
+      setAsDefaultProtocolClient: () => Effect.succeed(true),
     } as unknown as ElectronApp.ElectronApp["Service"];
     const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
 
@@ -230,5 +239,82 @@ describe("DesktopClerk", () => {
     ]);
     storageMock.mockClear();
     createClerkBridgeMock.mockClear();
+  });
+
+  it.effect("re-registers the protocol client with the unpackaged entry point on Windows", () => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const setAsDefaultProtocolClient = vi.fn(() => Effect.succeed(true));
+    const electronApp = {
+      quit: Effect.void,
+      on: () => Effect.void,
+      setAsDefaultProtocolClient,
+    } as unknown as ElectronApp.ElectronApp["Service"];
+    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
+
+    return Effect.gen(function* () {
+      const clerk = yield* DesktopClerk.DesktopClerk;
+      const exit = yield* Effect.exit(Effect.scoped(clerk.configure));
+
+      assert.isTrue(Exit.isSuccess(exit));
+      // The SDK bridge registers bare electron.exe, which boots the
+      // callback URL as the app path — the explicit entry point wins.
+      assert.deepEqual(setAsDefaultProtocolClient.mock.calls, [
+        ["t3code-dev", process.execPath, ["/tmp/dist-electron/main.cjs"]],
+      ]);
+    }).pipe(
+      Effect.provide(makeDesktopClerkLayer(true)),
+      Effect.provideService(ElectronApp.ElectronApp, electronApp),
+      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    );
+  });
+
+  it.effect("uses the production scheme for unpackaged non-development runs", () => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const setAsDefaultProtocolClient = vi.fn(() => Effect.succeed(true));
+    const electronApp = {
+      quit: Effect.void,
+      on: () => Effect.void,
+      setAsDefaultProtocolClient,
+    } as unknown as ElectronApp.ElectronApp["Service"];
+    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
+
+    return Effect.gen(function* () {
+      const clerk = yield* DesktopClerk.DesktopClerk;
+      yield* Effect.scoped(clerk.configure);
+
+      assert.deepEqual(setAsDefaultProtocolClient.mock.calls, [
+        ["t3code", process.execPath, ["/tmp/dist-electron/main.cjs"]],
+      ]);
+    }).pipe(
+      Effect.provide(makeDesktopClerkLayer(false)),
+      Effect.provideService(ElectronApp.ElectronApp, electronApp),
+      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    );
+  });
+
+  it.effect("skips protocol re-registration for packaged builds", () => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const setAsDefaultProtocolClient = vi.fn(() => Effect.succeed(true));
+    const electronApp = {
+      quit: Effect.void,
+      on: () => Effect.void,
+      setAsDefaultProtocolClient,
+    } as unknown as ElectronApp.ElectronApp["Service"];
+    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
+
+    return Effect.gen(function* () {
+      const clerk = yield* DesktopClerk.DesktopClerk;
+      const exit = yield* Effect.exit(Effect.scoped(clerk.configure));
+
+      assert.isTrue(Exit.isSuccess(exit));
+      assert.deepEqual(setAsDefaultProtocolClient.mock.calls, []);
+    }).pipe(
+      Effect.provide(makeDesktopClerkLayer(true, [], { isPackaged: true })),
+      Effect.provideService(ElectronApp.ElectronApp, electronApp),
+      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    );
   });
 });
