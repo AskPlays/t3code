@@ -104,8 +104,6 @@ const runtimeMock = {
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
     subscribedEvents: [] as Array<unknown | Promise<unknown>>,
-    subscribedEventsGate: null as Promise<void> | null,
-    subscribedEventsConsumed: 0,
     eventSubscribeObserved: null as (() => void) | null,
     eventStreamError: null as ((cause: unknown) => void) | null,
     permissionReplyCalls: [] as Array<{ requestID: string; reply: string }>,
@@ -178,8 +176,6 @@ const runtimeMock = {
     this.state.closeError = null;
     this.state.messages = [];
     this.state.subscribedEvents = [];
-    this.state.subscribedEventsGate = null;
-    this.state.subscribedEventsConsumed = 0;
     this.state.eventSubscribeObserved = null;
     this.state.eventStreamError = null;
     this.state.permissionReplyCalls.length = 0;
@@ -7959,7 +7955,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-opencode-foreign-subagent");
-      const owned = "http://127.0.0.1:9999/session";
       runtimeMock.state.subscribedEvents = [
         {
           type: "session.created",
