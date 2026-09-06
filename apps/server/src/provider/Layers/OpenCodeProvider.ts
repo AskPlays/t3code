@@ -13,6 +13,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
+  COMPACT_SLASH_COMMAND,
   nonEmptyTrimmed,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -552,7 +553,10 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     customModels,
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
-  const slashCommands = openCodeSlashCommands(inventoryExit.value.inventory);
+  const slashCommands = [
+    COMPACT_SLASH_COMMAND,
+    ...openCodeSlashCommands(inventoryExit.value.inventory),
+  ];
   const skills = flattenOpenCodeSkills(inventoryExit.value.inventory, cwd);
   const connectedCount = inventoryExit.value.inventory.providerList.connected.length;
   return buildServerProvider({

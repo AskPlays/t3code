@@ -407,6 +407,10 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
 
       NodeAssert.deepEqual(snapshot.slashCommands, [
         {
+          name: "compact",
+          description: "Summarize the conversation and reduce context usage",
+        },
+        {
           name: "Review",
           description: "Review changes",
           input: { hint: "[path] [focus]" },

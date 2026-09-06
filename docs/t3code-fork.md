@@ -16,6 +16,61 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-06 (f12d39359)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills`. Same resolution
+rule as before: in shared files adopt upstream's shapes so future merges stay
+small; keep fork-only logic in fork-only files. ~403 upstream commits behind
+(last sync was 2120fbc18 on 2026-09-03).
+
+- **Adapter**: upstream added turn token-usage accumulation (#9132,
+  `OpenCodeTurnTokenUsageAccumulator`, step-finish ownership tracking). Kept
+  alongside the fork's `OpenCodeSubagentTask` interface — both declarations
+  now live adjacent in `OpenCodeAdapter.ts`. Adopted upstream's abort-aware
+  event-stream test mock (permission/question tracking); kept the fork's
+  `command` endpoint mock beside upstream's new `summarize` mock.
+- **Projection now settles on `turn.aborted` — fork's Sep-1 workaround
+  partially reverted.** Upstream #9653 (Sep 4) made `turn.aborted` a
+  terminal ingestion event (status "interrupted", active turn cleared),
+  fixing at the right layer the stuck-after-Stop symptom that fork commit
+  `8a8f178ed` had worked around with an extra `turn.completed{interrupted}`
+  emit. That extra emit is removed (it broke upstream's new usage tests,
+  which `take(2)` terminal events per turn); the fork tests that pinned it
+  are restored to abort-only expectations (`take(5)`→`take(4)` where the
+  Sep-1 commit had bumped counts). Kept: the `turn.completed{failed}`
+  settle emits for failed prompt submissions (upstream still settles those
+  as "interrupted" with no error detail; the fork's failed state matches
+  the other providers), plus the ingestion test pinning interrupted
+  completion → ready.
+- **Provider**: upstream added a native `/compact`
+  (`COMPACT_SLASH_COMMAND`, also the `summarize` SDK surface the new
+  compact test exercises). Fork prepends it to its own inventory-derived
+  list: `slashCommands = [COMPACT_SLASH_COMMAND,
+...openCodeSlashCommands(inventory)]` (ClaudeProvider precedent).
+  `OpenCodeProvider` fork test updated for the compact row.
+- **ProviderService**: upstream's service layer now needs `FileSystem`
+  (new `ProviderAdapterRequestError` / `ProviderWorkspaceMissingError`
+  imports adopted); the fork's `getCommandCatalog` block is kept, and the
+  two fork catalog tests now provide `NodeServices.layer` in the service
+  pipe like upstream's tests do. `ws.ts` keeps both imports (fork's
+  `ProviderUnsupportedError`, upstream's `ProviderSessionDirectory`).
+- **Usage**: upstream added custom model prices (`createOverrideRateTable`,
+  adopted) and rewrote `docs/user/usage.md` (adopted, OpenCode kept in the
+  provider list). Usage chart helper renamed upstream
+  (`buildDayColumns` → `buildPeriodColumns`); fork test expectations kept
+  with opencode rows.
+- **ChatComposer**: merge duplicated the `serverEnvironment` import
+  (fork top-of-file + upstream mid-file block); removed the mid-file copy.
+  `apps/server/package.json` keeps the fork's nightly version string.
+  After merging, `vp i` was required before typecheck (claude-agent-sdk
+  bump, `@pierre/diffs` removed, `knip` added).
+- **Verified**: server typecheck clean (suggestions only); contracts, web,
+  mobile typecheck clean; OpenCodeAdapter + OpenCodeProvider +
+  opencodeRuntime.inventory + usageOpenCode 162/162; ProviderService +
+  ProviderRuntimeIngestion (+activity) + reconcile + UsageService 172/172;
+  CheckpointReactor + ProviderCommandReactor + ProviderSessionReaper 97/97;
+  web UsageProviderChart 11/11.
+
 ## Upstream sync 2026-09-03 (2120fbc18)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills`. Same resolution
