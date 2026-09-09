@@ -451,7 +451,7 @@ export const ProviderCommandCatalog = Schema.Struct({
 });
 export type ProviderCommandCatalog = typeof ProviderCommandCatalog.Type;
 
-export class ProviderCommandCatalogError extends Schema.TaggedErrorClass<ProviderCommandCatalogError>()(
+export class ProviderCommandCatalogError extends Schema.TaggedError<ProviderCommandCatalogError>()(
   "ProviderCommandCatalogError",
   {
     reason: Schema.Literals(["unsupported", "instance_not_found", "discovery_failed"]),
