@@ -13,13 +13,21 @@ The agent session itself runs inside that server's process tree — killing it s
   `~/.t3/runtime/versions/<version>/node_modules/t3/dist/bin.mjs serve` on `127.0.0.1:3773` →
   cloudflared tunnel child.
 - The served runtime version dir is **planted by hand** (it is NOT npm-installed): fork `dist/`
-  plus sibling deps borrowed from `versions/0.0.37`. Running any self-update / `t3 update` flow
+  plus sibling deps borrowed from the current fork version dir
+  (`versions/0.0.40`). Running any self-update / `t3 update` flow
   will `npm install` the official release over the fork code — **never do that.**
+- The server advertises a dynamic version to clients (baked version as the
+  floor, npm registry dist-tags as the signal; see `ServerAdvertisedVersion`)
+  so release clients do not nag about updates. The CLI version, pinned
+  runtime, and self-update flows keep the real baked version.
+- `/usr/bin/t3` is a symlink to the fork build (`apps/server/dist/bin.mjs`). There is no
+  global npm `t3` install and no `/root/t3-headless` checkout — both were removed to avoid
+  accidentally running mainline. Do not `npm i -g t3` on this machine.
 - T3 Connect/auth env lives in `/root/.t3/t3-connect.env` (Clerk publishable key, JWT template,
   OAuth client id, relay URL), loaded via the unit's `EnvironmentFile`. Without it the server
   boots but T3 Connect stays disabled.
-- `/root/t3-headless` is the retired standard nightly install. Nothing points at it; do not
-  "fix" the service back to it.
+- `/root/t3-headless` (the retired standard nightly install) was removed. If setup notes
+  elsewhere still reference it, ignore them — nothing should point at it.
 
 ### Update cycle (after changing server code)
 
@@ -32,7 +40,7 @@ VD=/root/.t3/runtime/versions/$V/node_modules/t3
 rsync -a --delete apps/server/dist/ $VD/dist/
 cp apps/server/package.json $VD/package.json
 # if V is a NEW version dir: create it first (mkdir -p, write .install-complete containing $V,
-# copy sibling node_modules from versions/0.0.37), then set activeVersion in
+# copy sibling node_modules from the current fork version dir), then set activeVersion in
 # ~/.t3/runtime/service-state.json to $V
 systemctl restart t3.service
 ```
@@ -46,7 +54,9 @@ systemctl restart t3.service
 - `pkill -f "<pattern>"` self-matches your own shell's command line — use a bracket trick
   (`pkill -f "[b]in.mjs serve"`) or kill by PID.
 - Machine has 3.7G RAM + 4G swap. Heavy installs/builds can OOM the server; prefer detached
-  background jobs and poll logs instead of long foreground commands.
+  background jobs and poll logs instead of long foreground commands. Never run a full
+  `tsgo --noEmit` here: it wants ~3GB and the OOM-killer takes it (and the memory
+  pressure restarts this very service). Use focused `vp test run <files>` instead.
 - State backups: `/root/t3-state-backups/`. gh CLI is authed as AskPlays (repo scope).
 
 ### Related repos
