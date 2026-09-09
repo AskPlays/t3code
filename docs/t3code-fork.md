@@ -16,6 +16,30 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-09 (e16b8b059)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills` (244 upstream
+commits). Same resolution rule: adopt upstream shapes in shared files, keep
+fork-only logic in fork-only files. Baked version stays `0.0.40` (matches
+upstream stable, so no version churn); runtime `versions/0.0.40` replanted
+with the merged build.
+
+- **Effect rc.112**: upstream upgraded `beta.103` → `rc.112`, renaming
+  `Schema.TaggedErrorClass` back to `Schema.TaggedError`. One fork
+  occurrence (`ProviderCommandCatalogError` in `packages/contracts/src/rpc.ts`)
+  renamed; `vp i` required after merge (lockfile churn).
+- **DesktopClerk**: `createDesktopClerkBridge` is module-private again, so the
+  fork renderer-origin test now configures through the layer and asserts the
+  `createClerkBridge` mock args (scheme per dev/prod, host `app`). Fork
+  protocol re-registration tests kept untouched.
+- **ChatComposer**: fork catalog placeholder atom kept alongside upstream's
+  new `SnapShotAttachmentFrame` (independent additions at the same spot).
+- **Verified** (focused suites only — full `tsgo` OOMs this box, see
+  `docs/operations/local-deployment.md`): ServerAdvertisedVersion +
+  ServerEnvironment 11/11; DesktopClerk 10/10; OpenCodeAdapter 132/132;
+  ProviderService 84/84; ProviderRuntimeIngestion 67/67; CheckpointReactor +
+  ProviderCommandReactor + ProviderSessionReaper + reconcile 131/131.
+
 ## Upstream sync 2026-09-06 (f12d39359)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills`. Same resolution
