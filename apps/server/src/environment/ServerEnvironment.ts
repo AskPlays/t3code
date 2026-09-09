@@ -19,6 +19,7 @@ import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { makeAdvertisedServerVersionTracker } from "./ServerAdvertisedVersion.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
 
@@ -202,6 +203,13 @@ export const make = Effect.gen(function* () {
   const desktopAppUpdate =
     serverSelfUpdate === "desktop-managed" && serverConfig.desktopTelemetryControlFd !== undefined;
 
+  // The advertised version tracks the newest known release (see
+  // ServerAdvertisedVersion) so release clients do not nag about an update.
+  // It refreshes in the background for the life of this layer.
+  const advertisedVersion = yield* makeAdvertisedServerVersionTracker({
+    bakedVersion: packageJson.version,
+  });
+
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
     label,
@@ -244,12 +252,18 @@ export const make = Effect.gen(function* () {
     getEnvironmentId: Effect.succeed(environmentId),
     // The publish opt-in and relay link change at runtime (`t3 connect
     // publish`, the client settings toggle), so the capability is read per
-    // descriptor request rather than baked in at startup.
+    // descriptor request rather than baked in at startup. Same for the
+    // advertised version, which tracks the newest known release.
     getDescriptor: readAgentActivityPublishingActive(secrets).pipe(
-      Effect.map((agentActivityPublishing) => ({
-        ...descriptor,
-        capabilities: { ...descriptor.capabilities, agentActivityPublishing },
-      })),
+      Effect.flatMap((agentActivityPublishing) =>
+        advertisedVersion.current.pipe(
+          Effect.map((serverVersion) => ({
+            ...descriptor,
+            serverVersion,
+            capabilities: { ...descriptor.capabilities, agentActivityPublishing },
+          })),
+        ),
+      ),
     ),
   });
 });
