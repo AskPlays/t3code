@@ -16,6 +16,25 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-14 (9375c7797)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills` (46 upstream
+commits, clean merge with no conflicts). Same resolution rule: adopt upstream
+shapes in shared files, keep fork-only logic in fork-only files.
+
+- **No fork follow-ups needed**: `Schema.TaggedError` naming unchanged,
+  fork RPC (`serverGetProviderCommandCatalog`), adapter subagent mapping,
+  and composer catalog atom all survived the merge untouched.
+- **Notable upstream**: self-contained CLI archives / release pipeline
+  rework (#11316–#11702 series), worktree setup tracking in `ws.ts`,
+  reusable dev auth token (#8606), compact sidebar modes, desktop local
+  environment toggle (#9194). `vp i` required after merge (bun deps
+  removed from catalog/lockfile).
+- **Verified** (focused suites only): OpenCodeAdapter 132/132;
+  ProviderService + OpenCodeProvider + usage 114; ProviderRuntimeIngestion
+  78/78; opencodeRuntime.inventory + usageOpenCode + UsageService 26/26;
+  contracts typecheck clean (suggestions only).
+
 ## Upstream sync 2026-09-09 (e16b8b059)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills` (244 upstream
