@@ -16,6 +16,35 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-17 (4749035bd)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills` (147 upstream
+commits, 5 conflicted files). Same resolution rule: adopt upstream shapes in
+shared files, keep fork-only logic in fork-only files.
+
+- **Native slash commands adopted, fork detached flow removed.** Upstream
+  #11519 + native `session.command` admission (#12166 series) supersedes the
+  fork's detached `session.command` block in `OpenCodeAdapter.ts` (removed,
+  with `failDetachedCommand`/`pendingCommandFailure` now dead but kept).
+  The 4 detached-lifecycle tests are removed; the 2 dispatch-shape tests are
+  updated to native expectations (`messageID` + `parts`). Mock
+  `command.list` defaults to `[{review}]` to match upstream.
+  Extra `turn.completed{failed}` emit on prompt-submit timeout removed
+  (upstream owns settle via `turn.aborted`).
+- **Inventory**: adopted upstream `OpenCodeInventory` (`skills` + optional
+  `commands?: SlashCommand`, `loadOpenCodeCommands`); kept fork
+  `loadOpenCodeCommandCatalogFromClient` for the per-thread catalog RPC.
+  `opencodeCatalog.ts` unchanged (scope-aware skills, case-insensitive
+  command dedup).
+- **Provider snapshot**: kept fork `slashCommands = [COMPACT,
+...openCodeSlashCommands]` + `flattenOpenCodeSkills` scope classification;
+  kept upstream `openCodeCommandsToServerProviderSlashCommands` export for
+  the driver/workspace snapshot. `showInteractionModeToggle` stays `true`.
+- **ChatComposer**: union of imports (`flushSync` + fork atom catalog).
+- **Verified** (focused suites only): OpenCodeAdapter 135/135;
+  OpenCodeProvider 19/19; ProviderService + RuntimeIngestion + inventory
+  186/186.
+
 ## Upstream sync 2026-09-14 (9375c7797)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills` (46 upstream

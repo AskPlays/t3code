@@ -187,9 +187,24 @@ export interface OpenCodeCommandResult {
 export interface OpenCodeInventory {
   readonly providerList: ProviderListResponse;
   readonly agents: ReadonlyArray<Agent>;
-  readonly commands: ReadonlyArray<Command>;
   readonly skills: ReadonlyArray<OpenCodeSkill>;
+  readonly commands?: ReadonlyArray<OpenCodeSlashCommand>;
 }
+
+export type OpenCodeSlashCommand = Pick<Command, "name" | "description" | "source" | "hints">;
+
+/** Command templates stay in OpenCode, which expands arguments and runs MCP prompts. */
+export const loadOpenCodeCommands = (client: OpencodeClient) =>
+  runOpenCodeSdk("command.list", (signal) => client.command.list(undefined, { signal })).pipe(
+    Effect.map((result): ReadonlyArray<OpenCodeSlashCommand> =>
+      (result.data ?? []).map(({ name, description, source, hints }) => ({
+        name,
+        ...(description === undefined ? {} : { description }),
+        ...(source === undefined ? {} : { source }),
+        hints,
+      })),
+    ),
+  );
 
 export interface ParsedOpenCodeModelSlug {
   readonly providerID: string;
@@ -949,17 +964,6 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       Effect.orElseSucceed((): ReadonlyArray<Agent> => []),
     );
 
-  const loadCommands = (client: OpencodeClient) =>
-    runOpenCodeSdk("command.list", () => client.command.list()).pipe(
-      Effect.map((result) => result.data ?? []),
-      Effect.tapError((cause) =>
-        Effect.logWarning("OpenCode command discovery failed; continuing without commands.", {
-          detail: cause.detail,
-        }),
-      ),
-      Effect.orElseSucceed(() => [] as ReadonlyArray<Command>),
-    );
-
   const loadOpenCodeSkills: OpenCodeRuntimeShape["loadOpenCodeSkills"] = (client) =>
     runOpenCodeSdk("app.skills", (signal) => client.app.skills(undefined, { signal })).pipe(
       Effect.map((result) =>
@@ -975,14 +979,21 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
     Effect.all(
-      [loadProviders(client), loadAgents(client), loadCommands(client), loadSkills(client)],
-      { concurrency: "unbounded" },
+      [
+        loadProviders(client),
+        loadAgents(client),
+        loadSkills(client),
+        loadOpenCodeCommands(client).pipe(Effect.orElseSucceed(() => [])),
+      ],
+      {
+        concurrency: "unbounded",
+      },
     ).pipe(
-      Effect.map(([providerList, agents, commands, skills]) => ({
+      Effect.map(([providerList, agents, skills, commands]) => ({
         providerList,
         agents,
-        commands,
         skills,
+        commands,
       })),
     );
 

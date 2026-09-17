@@ -3,6 +3,7 @@ import {
   type OpenCodeSettings,
   type ServerProviderModel,
   type ServerProviderSkill,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -348,6 +349,26 @@ function flattenOpenCodeSkills(
   }
 
   return skills.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
+export function openCodeCommandsToServerProviderSlashCommands(
+  input: OpenCodeInventory["commands"],
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const commands: ServerProviderSlashCommand[] = [COMPACT_SLASH_COMMAND];
+  const names = new Set([COMPACT_SLASH_COMMAND.name]);
+  for (const command of input ?? []) {
+    const name = trimOptional(command.name);
+    if (!name || names.has(name) || command.source === "skill") continue;
+    names.add(name);
+    const description = trimOptional(command.description);
+    const hint = trimOptional(command.hints.join(" "));
+    commands.push({
+      name,
+      ...(description ? { description } : {}),
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return commands;
 }
 
 export const makePendingOpenCodeProvider = (
