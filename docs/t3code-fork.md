@@ -16,6 +16,32 @@ launched with `-NotifySession <thread-session-id>` shows as a
 "review \<timestamp\>" row in the thread's agents panel (Working → activity →
 tokens → Idle) with a working stop control.
 
+## Upstream sync 2026-09-23 (b21c545654)
+
+Merged `upstream/main` into `feat/opencode-commands-and-skills` (238 upstream
+commits, 1 conflicted file). Same resolution rule: adopt upstream shapes in
+shared files, keep fork-only logic in fork-only files.
+
+- **UsageService conflict resolved.** Upstream reworked usage scanning around
+  `volumeId` fingerprints, retained-cache records for cleaned-up directories,
+  and dropped `walkedRoots` (`pruneScanCache` now takes only the retention
+  cutoff). Adopted that structure and re-seated the fork's OpenCode-sqlite
+  branch into it: `dirs` entries carry both `volumeId` and
+  `kind: "jsonl" | "opencodeSqlite"`, and the scan loop runs upstream's
+  retained-files path for jsonl while sqlite keeps its ok/partial/failed
+  handling (plus a `missing` source when the database dir is absent).
+- **Fork catalog plumbing survived auto-merge.** `serverGetProviderCommandCatalog`
+  (contracts), adapter `getCommandCatalog`, and the composer's
+  `providerCommandCatalog` query are intact; upstream's `ProviderRuntimeIngestion`
+  change (new `permission_approval` request kind) is additive.
+- **Notable upstream**: no-restyle UI series (composer owns its look —
+  watch fork ChatComposer edits), shared provider sign-in flows (#12983),
+  remote compatibility ranges (#13130), PR sync quota fixes. `vp i` required
+  after merge (stale install broke the contracts import in tests).
+- **Verified** (focused suites only): UsageService + scanCache + openCode
+  33/33; OpenCodeAdapter + OpenCodeProvider + inventory 162/162;
+  ProviderService + RuntimeIngestion + CommandReactor 247/247.
+
 ## Upstream sync 2026-09-17 (4749035bd)
 
 Merged `upstream/main` into `feat/opencode-commands-and-skills` (147 upstream
