@@ -1,6 +1,14 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { ClaudeAI, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import {
+  AntigravityIcon,
+  ClaudeAI,
+  CursorIcon,
+  GrokIcon,
+  type Icon,
+  OpenAI,
+  OpenCodeIcon,
+} from "../Icons";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -30,14 +38,9 @@ export const PROVIDER_PRESENTATION = {
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     mark: GrokIcon,
   },
-  // Fork-only usage kind. No server surface scans OpenCode yet in upstream;
-  // the entry exists because Record<UsageProviderKind, ...> is exhaustive over
-  // the fork's contract.
-  opencode: {
-    label: "OpenCode",
-    color: "#8f8b8b",
-    mark: OpenCodeIcon,
-  },
+  cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
+  opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
+  antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */
