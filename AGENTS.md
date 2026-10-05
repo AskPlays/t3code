@@ -164,7 +164,31 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Local deployment (this machine)
 
-The live server runs from `/root/dev/t3code`'s build. Read
+The live server runs a deployed copy of `/root/dev/t3code`'s build. Read
 `docs/operations/local-deployment.md` before restarting services, touching
 `~/.t3`, or running self-update flows. The agent session runs inside the
 server's process tree and can strand itself.
+
+### Provider history during fork maintenance
+
+OpenCode 1.x can repeatedly persist full file-diff summaries in message-update
+events. A large upstream sync can turn a temporary maintenance chat into several
+GB of database history ([upstream issue](https://github.com/anomalyco/opencode/issues/42748)).
+
+- Use Codex for large upstream merges/rebases, repository-wide regeneration,
+  and bulk file removal. Keep these operations in a dedicated worktree so they
+  do not change the files beneath an existing OpenCode session. Start a fresh
+  OpenCode thread from the committed result for subsequent feature work.
+- On this machine, OpenCode is configured to use
+  `/opt/t3-opencode/node_modules/.bin/opencode` (v2). Preserve that selection;
+  shell aliases and older installs can resolve to another version. Upgrading
+  alone is not proof that large diff histories are bounded.
+- Inspect broad changes with `git diff --stat` first, then read patches for
+  specific files. Keep generated files, build output, and dependency trees out
+  of tracked changes unless the task requires them.
+- Before and after bulk maintenance, check `df -h /` and
+  `du -sh ~/.local/share/opencode/opencode.db*`. If provider storage grows by
+  hundreds of MB during one operation, investigate before continuing. Stop
+  installs/builds when disk headroom is insufficient. Deleting chats or
+  compacting provider databases requires explicit authorization; archiving a
+  thread does not reclaim its provider history.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write a T3 Code PR"
+  short_description: "Explain PR changes with concise evidence and sketches"
+  default_prompt: "Use $write-pr to draft or revise a concise PR title and body from the final diff and verification evidence."
