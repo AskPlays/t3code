@@ -164,7 +164,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Local deployment (this machine)
 
-The live server runs from `/root/dev/t3code`'s build. Read
+The live server runs a deployed copy of `/root/dev/t3code`'s build. Read
 `docs/operations/local-deployment.md` before restarting services, touching
 `~/.t3`, or running self-update flows. The agent session runs inside the
 server's process tree and can strand itself.
