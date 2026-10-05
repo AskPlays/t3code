@@ -143,9 +143,13 @@ export const make = Effect.gen(function* () {
       // records `"electron.exe" "%1"`, so a browser callback boots bare
       // Electron with the URL as the app path ("Unable to find Electron
       // app"). Re-register with the real entry point; the bridge already
-      // ran, so this wins. Packaged builds and the mac dev launcher own
-      // their registration.
-      if (!environment.isPackaged && environment.platform === "win32") {
+      // ran, so this wins. Development callbacks also need the dev server
+      // environment, which this bare command cannot restore.
+      if (
+        !environment.isPackaged &&
+        !environment.isDevelopment &&
+        environment.platform === "win32"
+      ) {
         yield* electronApp.setAsDefaultProtocolClient(
           ElectronProtocol.getDesktopScheme(environment.isDevelopment),
           process.execPath,

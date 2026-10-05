@@ -82,7 +82,10 @@ const makeDesktopClerkLayer = (
 };
 
 describe("DesktopClerk", () => {
-  it.effect("uses the production scheme for unpackaged non-development runs", () => {
+  it.effect.each([
+    { name: "non-development", isDevelopment: false },
+    { name: "development", isDevelopment: true },
+  ])("registers the app entry point only outside development ($name)", ({ isDevelopment }) => {
     storageMock.mockReturnValue(storageAdapter);
     createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
     const setAsDefaultProtocolClient = vi.fn(() => Effect.succeed(true));
@@ -97,11 +100,12 @@ describe("DesktopClerk", () => {
       const clerk = yield* DesktopClerk.DesktopClerk;
       yield* Effect.scoped(clerk.configure);
 
-      assert.deepEqual(setAsDefaultProtocolClient.mock.calls, [
-        ["t3code", process.execPath, ["/tmp/dist-electron/main.cjs"]],
-      ]);
+      assert.deepEqual(
+        setAsDefaultProtocolClient.mock.calls,
+        isDevelopment ? [] : [["t3code", process.execPath, ["/tmp/dist-electron/main.cjs"]]],
+      );
     }).pipe(
-      Effect.provide(makeDesktopClerkLayer(false, [], "win32")),
+      Effect.provide(makeDesktopClerkLayer(isDevelopment, [], "win32")),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
     );
