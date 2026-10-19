@@ -151,13 +151,8 @@ export const make = Effect.gen(function* () {
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
 
-      // The bridge registers the callback scheme via bare
-      // setAsDefaultProtocolClient(scheme). For unpackaged Windows runs that
-      // records `"electron.exe" "%1"`, so a browser callback boots bare
-      // Electron with the URL as the app path ("Unable to find Electron
-      // app"). Re-register with the real entry point; the bridge already
-      // ran, so this wins. Development callbacks also need the dev server
-      // environment, which this bare command cannot restore.
+      // Clerk's bare scheme registration omits the app entry on unpackaged Windows.
+      // Development callbacks also need dev server environment this command cannot restore.
       if (
         !environment.isPackaged &&
         !environment.isDevelopment &&
